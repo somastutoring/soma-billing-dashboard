@@ -1,5 +1,4 @@
 # streamlit_app.py
-import json
 from datetime import datetime
 
 import streamlit as st
@@ -25,10 +24,8 @@ st.set_page_config(page_title="Soma's Tutoring Billing", layout="centered")
 
 st.sidebar.title("Google Sheets Setup")
 
-sheet_ref = st.sidebar.text_input(
-    "Google Sheet URL or Title",
-    help="Same sheet where your 'sessions' tab lives (with the 'sessions' tab).",
-)
+# Get sheet_ref from secrets (you already added this)
+sheet_ref = st.secrets.get("sheet_ref", "").strip()
 
 legacy_clients_str = st.sidebar.text_input(
     "Legacy Clients (comma-separated)",
@@ -42,22 +39,29 @@ gc = None
 sh = None
 ws = None
 
-# ✅ Use Streamlit secrets instead of file upload
-if "gcp_service_account" in st.secrets and sheet_ref.strip():
+if not sheet_ref:
+    st.sidebar.error("❌ No sheet_ref found in secrets. Add sheet_ref to your Streamlit secrets.")
+else:
+    st.sidebar.write("📄 Using sheet:")
+    st.sidebar.code(sheet_ref)
+
+# ✅ Use Streamlit secrets for Google auth + sheet
+if "gcp_service_account" in st.secrets and sheet_ref:
     try:
-        # st.secrets["gcp_service_account"] is a toml dict
         gc = create_gc_from_info(dict(st.secrets["gcp_service_account"]))
-        sh, ws = open_or_create_sheet(gc, sheet_ref.strip())
+        sh, ws = open_or_create_sheet(gc, sheet_ref)
         st.sidebar.success(f"✅ Connected to: {sh.title}")
     except Exception as e:
         st.sidebar.error(f"❌ Connection error: {e}")
 else:
-    st.sidebar.info("Add gcp_service_account to Streamlit secrets and enter your Sheet URL/title.")
+    if sheet_ref:
+        st.sidebar.error("❌ gcp_service_account missing in secrets.")
+    # if no sheet_ref, error already shown above
 
 # ✅ Test button to verify key + sheet access
 if st.sidebar.button("✅ Test Google Connection"):
     if ws is None:
-        st.sidebar.error("❌ Not connected. Check secrets and sheet URL/title.")
+        st.sidebar.error("❌ Not connected. Check secrets (gcp_service_account + sheet_ref).")
     else:
         try:
             test_rows = ws.get_all_records()
@@ -68,7 +72,7 @@ if st.sidebar.button("✅ Test Google Connection"):
 
 def require_ws():
     if ws is None:
-        st.error("❌ Not connected to Google Sheets. Check the sidebar.")
+        st.error("❌ Not connected to Google Sheets. Check the sidebar/secrets.")
         st.stop()
 
 
@@ -172,7 +176,7 @@ with tab_log:
             )
 
             # Rebuild summary sheet
-            update_tutor_summary_sheet(gc, sheet_ref.strip())
+            update_tutor_summary_sheet(gc, sheet_ref)
 
             st.success(
                 f"Saved session for {student} on {date_iso}. "
@@ -216,7 +220,7 @@ with tab_client:
                 st.stop()
             date_iso = parse_date(date_cp)
             count = mark_client_paid(ws, student_cp.strip(), date_iso)
-            update_tutor_summary_sheet(gc, sheet_ref.strip())
+            update_tutor_summary_sheet(gc, sheet_ref)
             if count == 0:
                 st.info("No matching sessions found that were not already Paid.")
             else:
@@ -264,7 +268,7 @@ with tab_weekly:
             try:
                 sunday_iso = parse_date(sunday_input)
                 updated = mark_tutor_notes_paid(ws, sunday_iso)
-                update_tutor_summary_sheet(gc, sheet_ref.strip())
+                update_tutor_summary_sheet(gc, sheet_ref)
                 if updated == 0:
                     st.info("No 'Pay <Tutor>' notes found for that week.")
                 else:
@@ -282,7 +286,7 @@ with tab_month:
 
     if st.button("Rebuild tutor_summary sheet"):
         try:
-            rows = update_tutor_summary_sheet(gc, sheet_ref.strip())
+            rows = update_tutor_summary_sheet(gc, sheet_ref)
             if rows:
                 st.success("tutor_summary sheet rebuilt.")
             else:
