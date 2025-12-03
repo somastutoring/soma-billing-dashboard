@@ -18,6 +18,34 @@ from billing_logic import (
     update_tutor_summary_sheet,
 )
 
+# ----- Simple password gate -----
+def check_password():
+    """Simple password-based auth using Streamlit secrets."""
+    correct_pw = st.secrets.get("admin_password", "")
+    if not correct_pw:
+        st.error("Admin password not set in secrets (admin_password).")
+        return False
+
+    if "pw_ok" not in st.session_state:
+        st.session_state.pw_ok = False
+
+    if not st.session_state.pw_ok:
+        st.title("Soma's Tutoring – Admin Login")
+        pw = st.text_input("Enter admin password", type="password")
+        if st.button("Log in"):
+            if pw == correct_pw:
+                st.session_state.pw_ok = True
+                st.success("Logged in ✅")
+            else:
+                st.error("Incorrect password.")
+        return False
+
+    return True
+
+if not check_password():
+    st.stop()
+
+# ----- App config -----
 st.set_page_config(page_title="Soma's Tutoring Billing", layout="centered")
 
 # ---------- Sidebar: connection + settings ----------
@@ -56,7 +84,6 @@ if "gcp_service_account" in st.secrets and sheet_ref:
 else:
     if sheet_ref:
         st.sidebar.error("❌ gcp_service_account missing in secrets.")
-    # if no sheet_ref, error already shown above
 
 # ✅ Test button to verify key + sheet access
 if st.sidebar.button("✅ Test Google Connection"):
