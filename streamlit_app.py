@@ -21,17 +21,13 @@ from billing_logic import (
 
 st.set_page_config(page_title="Soma's Tutoring Billing", layout="centered")
 
-
 # ---------- Sidebar: connection + settings ----------
 
 st.sidebar.title("Google Sheets Setup")
 
-creds_file = st.sidebar.file_uploader(
-    "Upload Service Account JSON", type=["json"], accept_multiple_files=False
-)
 sheet_ref = st.sidebar.text_input(
     "Google Sheet URL or Title",
-    help="Same sheet where your 'sessions' tab lives.",
+    help="Same sheet where your 'sessions' tab lives (with the 'sessions' tab).",
 )
 
 legacy_clients_str = st.sidebar.text_input(
@@ -46,29 +42,37 @@ gc = None
 sh = None
 ws = None
 
-if "creds_info" not in st.session_state:
-    st.session_state["creds_info"] = None
-
-if creds_file is not None and st.session_state["creds_info"] is None:
+# ✅ Use Streamlit secrets instead of file upload
+if "gcp_service_account" in st.secrets and sheet_ref.strip():
     try:
-        st.session_state["creds_info"] = json.load(creds_file)
-    except Exception as e:
-        st.sidebar.error(f"Error reading JSON: {e}")
-
-if st.session_state["creds_info"] and sheet_ref.strip():
-    try:
-        gc = create_gc_from_info(st.session_state["creds_info"])
+        # st.secrets["gcp_service_account"] is a toml dict
+        gc = create_gc_from_info(dict(st.secrets["gcp_service_account"]))
         sh, ws = open_or_create_sheet(gc, sheet_ref.strip())
-        st.sidebar.success(f"Connected to: {sh.title}")
+        st.sidebar.success(f"✅ Connected to: {sh.title}")
     except Exception as e:
-        st.sidebar.error(f"Connection error: {e}")
+        st.sidebar.error(f"❌ Connection error: {e}")
+else:
+    st.sidebar.info("Add gcp_service_account to Streamlit secrets and enter your Sheet URL/title.")
+
+# ✅ Test button to verify key + sheet access
+if st.sidebar.button("✅ Test Google Connection"):
+    if ws is None:
+        st.sidebar.error("❌ Not connected. Check secrets and sheet URL/title.")
+    else:
+        try:
+            test_rows = ws.get_all_records()
+            st.sidebar.success(f"✅ Connection OK! Found {len(test_rows)} rows in 'sessions'.")
+        except Exception as e:
+            st.sidebar.error(f"❌ Sheet read test failed: {e}")
 
 
 def require_ws():
     if ws is None:
-        st.error("Connect to Google Sheets in the sidebar first.")
+        st.error("❌ Not connected to Google Sheets. Check the sidebar.")
         st.stop()
 
+
+# ---------- Main UI ----------
 
 st.title("Soma's Tutoring – Billing Dashboard")
 
@@ -83,7 +87,7 @@ with tab_log:
 
     require_ws()
 
-    # pull current data from sheet
+    # Pull current data from sheet
     records = ws.get_all_records()
     existing_students = sorted(
         {r["student_name"] for r in records if r.get("student_name")}
@@ -176,7 +180,6 @@ with tab_log:
                 f"Tutor Pay: ${fin['tutor_pay']:.2f} • Notes: {fin['notes']}"
             )
             st.info("New students/tutors will automatically appear in the dropdown after refresh.")
-
         except Exception as e:
             st.error(f"Error submitting session: {e}")
 
@@ -194,7 +197,9 @@ with tab_client:
     )
 
     student_cp = st.selectbox(
-        "Student Name", ["(type manually)"] + existing_students, index=1 if existing_students else 0
+        "Student Name",
+        ["(type manually)"] + existing_students,
+        index=1 if existing_students else 0,
     )
     if student_cp == "(type manually)":
         student_cp = st.text_input("Student name", "")
@@ -215,7 +220,9 @@ with tab_client:
             if count == 0:
                 st.info("No matching sessions found that were not already Paid.")
             else:
-                st.success(f"Updated {count} session(s) to Paid for {student_cp} on {date_iso}.")
+                st.success(
+                    f"Updated {count} session(s) to Paid for {student_cp} on {date_iso}."
+                )
         except Exception as e:
             st.error(f"Error marking paid: {e}")
 
@@ -283,6 +290,7 @@ with tab_month:
         except Exception as e:
             st.error(f"Error rebuilding summary: {e}")
 
+    # Show preview if exists
     try:
         summary_ws = sh.worksheet("tutor_summary")
         vals = summary_ws.get_all_values()
