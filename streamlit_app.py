@@ -15,6 +15,7 @@ from billing_logic import (
     mark_client_paid,
     mark_tutor_notes_paid,
     update_tutor_summary_sheet,
+    list_unpaid_sessions,  # <-- NEW IMPORT
 )
 
 # ---------------- PASSWORD GATE ----------------
@@ -54,12 +55,16 @@ st.title("Soma's Tutoring – Billing Dashboard")
 
 sheet_ref = st.secrets.get("sheet_ref", "").strip()
 
-legacy_clients_str = st.sidebar.text_input(
-    "Legacy Clients (comma-separated)",
-    value="Brie, Rafi, Caylee, Rishi",
-)
+# Legacy clients now hidden in secrets too
+legacy_default = ["Brie", "Rafi", "Caylee", "Rishi"]
+legacy_secret = st.secrets.get("legacy_clients", legacy_default)
 
-legacy_clients = [x.strip() for x in legacy_clients_str.split(",") if x.strip()]
+if isinstance(legacy_secret, list):
+    legacy_clients = [x.strip() for x in legacy_secret if x.strip()]
+else:
+    legacy_clients = [
+        x.strip() for x in str(legacy_secret).split(",") if x.strip()
+    ]
 
 gc = None
 sh = None
@@ -138,6 +143,13 @@ with tab_log:
 
     if st.button("Submit Session", type="primary"):
         try:
+            if not student.strip():
+                st.error("Student cannot be empty.")
+                st.stop()
+            if not tutor.strip():
+                st.error("Tutor cannot be empty.")
+                st.stop()
+
             date_iso = parse_date(date_str)
             minutes_val = parse_duration(minutes_text, hhmm_text)
 
@@ -156,31 +168,65 @@ with tab_log:
             update_tutor_summary_sheet(gc, sheet_ref)
 
             st.success(
-                f"Parent pays: ${fin['amount_due']:.2f} • "
-                f"Tutor pay: ${fin['tutor_pay']:.2f} • "
-                f"Notes: {fin['notes']}"
+                f"Saved session for {student} on {date_iso}. "
+                f"Parent Pays: ${fin['amount_due']:.2f} • "
+                f"Tutor Pay: ${fin['tutor_pay']:.2f} • Notes: {fin['notes']}"
             )
         except Exception as e:
             st.error(str(e))
 
-# ---------------- TAB 2: MARK CLIENT PAID ----------------
+# ---------------- TAB 2: CLIENT PAYMENTS + UNPAID LIST ----------------
 
 with tab_client:
-    st.subheader("Mark Client as Paid")
+    st.subheader("Client Payments")
     require_ws()
 
     records = ws.get_all_records()
     students = sorted({r["student_name"] for r in records if r.get("student_name")})
 
-    student_pick = st.selectbox("Student", students)
-    date_str = st.text_input("Session Date", value=datetime.today().date().isoformat())
+    st.markdown("### Mark a Specific Session as Paid")
+
+    colc1, colc2 = st.columns(2)
+    with colc1:
+        student_pick = st.selectbox("Student", students)
+    with colc2:
+        date_cp = st.text_input(
+            "Session Date", value=datetime.today().date().isoformat()
+        )
 
     if st.button("Mark Client Paid"):
         try:
-            date_iso = parse_date(date_str)
+            date_iso = parse_date(date_cp)
             count = mark_client_paid(ws, student_pick, date_iso)
             update_tutor_summary_sheet(gc, sheet_ref)
-            st.success(f"{count} session(s) updated.")
+            if count == 0:
+                st.info("No matching sessions found or already Paid.")
+            else:
+                st.success(f"{count} session(s) updated to Paid.")
+        except Exception as e:
+            st.error(str(e))
+
+    st.markdown("---")
+    st.markdown("### Clients With Unpaid Sessions")
+
+    if st.button("Show Unpaid Sessions"):
+        try:
+            unpaid = list_unpaid_sessions(ws)
+            if not unpaid:
+                st.success("🎉 All sessions are either Paid or Free.")
+            else:
+                # Summary by student
+                totals = {}
+                for r in unpaid:
+                    name = r["student_name"] or "(Unknown)"
+                    totals[name] = totals.get(name, 0.0) + r["amount_due"]
+
+                st.markdown("**Unpaid totals by student:**")
+                for name, amt in sorted(totals.items()):
+                    st.write(f"- **{name}**: ${amt:.2f}")
+
+                st.markdown("**Unpaid session details:**")
+                st.dataframe(unpaid)
         except Exception as e:
             st.error(str(e))
 
@@ -194,26 +240,34 @@ with tab_weekly:
         value=datetime.today().date().isoformat()
     )
 
-    if st.button("Show Weekly Totals"):
-        try:
-            sunday_iso = parse_date(sunday_input)
-            info = compute_weekly_tutor_totals(ws, sunday_iso)
+    colw1, colw2 = st.columns(2)
+    with colw1:
+        if st.button("Show Weekly Totals"):
+            try:
+                sunday_iso = parse_date(sunday_input)
+                info = compute_weekly_tutor_totals(ws, sunday_iso)
 
-            st.write(f"Week: {info['start']} → {info['end']}")
-            for tutor, amt in info["totals"].items():
-                st.write(f"**{tutor}**: ${amt:.2f}")
+                st.write(f"Week: {info['start']} → {info['end']}")
+                if not info["totals"]:
+                    st.info("No non-Nitin tutor sessions in this week.")
+                else:
+                    for tutor_name, amt in sorted(info["totals"].items()):
+                        st.write(f"**{tutor_name}**: ${amt:.2f}")
+            except Exception as e:
+                st.error(str(e))
 
-        except Exception as e:
-            st.error(str(e))
-
-    if st.button("Mark Tutor Notes Paid for Week"):
-        try:
-            sunday_iso = parse_date(sunday_input)
-            updated = mark_tutor_notes_paid(ws, sunday_iso)
-            update_tutor_summary_sheet(gc, sheet_ref)
-            st.success(f"{updated} tutor notes updated to Paid.")
-        except Exception as e:
-            st.error(str(e))
+    with colw2:
+        if st.button("Mark Tutor Notes Paid for Week"):
+            try:
+                sunday_iso = parse_date(sunday_input)
+                updated = mark_tutor_notes_paid(ws, sunday_iso)
+                update_tutor_summary_sheet(gc, sheet_ref)
+                if updated == 0:
+                    st.info("No 'Pay <Tutor>' notes found for that week.")
+                else:
+                    st.success(f"{updated} tutor note(s) updated to 'Paid ...'.")
+            except Exception as e:
+                st.error(str(e))
 
 # ---------------- TAB 4: MONTHLY SUMMARY ----------------
 
@@ -230,6 +284,9 @@ with tab_month:
     try:
         summary_ws = sh.worksheet("tutor_summary")
         vals = summary_ws.get_all_values()
-        st.table(vals)
-    except:
-        st.info("No summary sheet yet.")
+        if vals:
+            st.table(vals)
+        else:
+            st.info("Summary sheet is empty.")
+    except Exception:
+        st.info("No summary sheet yet. Click 'Rebuild Summary' to create it.")
