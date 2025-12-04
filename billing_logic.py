@@ -190,6 +190,7 @@ def append_session(
     paid_status = (paid_status or "Not Paid").strip()
     is_free = paid_status.lower().startswith("free")
 
+    # Parent pays:
     if is_free:
         amount_due = 0.00
     else:
@@ -288,6 +289,7 @@ def list_unpaid_sessions(ws) -> List[Dict[str, Any]]:
 
         results.append(
             {
+                "id": r.get("id", ""),  # include ID so we can mark by session
                 "student_name": r.get("student_name", ""),
                 "date": r.get("date", ""),
                 "service": r.get("service", ""),
@@ -300,8 +302,44 @@ def list_unpaid_sessions(ws) -> List[Dict[str, Any]]:
     return results
 
 
+def mark_session_paid_by_id(ws, session_id: str) -> int:
+    """
+    Mark a specific session as Paid by its unique 'id' field.
+    Returns 1 if updated, 0 if not found or already paid.
+    """
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return 0
+
+    header = ws.row_values(1)
+    try:
+        id_idx = header.index("id") + 1
+        paid_idx = header.index("paid_status") + 1
+    except ValueError:
+        return 0
+
+    all_values = ws.get_all_values()
+
+    for row_num in range(2, len(all_values) + 1):
+        row = all_values[row_num - 1]
+        if len(row) < max(id_idx, paid_idx):
+            continue
+
+        r_id = (row[id_idx - 1] or "").strip()
+        r_status = (row[paid_idx - 1] or "").strip().lower()
+
+        if r_id == session_id:
+            if r_status not in ("paid", "free session"):
+                ws.update_cell(row_num, paid_idx, "Paid")
+                return 1
+            return 0
+
+    return 0
+
+
 def mark_client_paid(ws, student_name: str, date_iso: str) -> int:
     """
+    (Legacy helper – not used in the new UI, but kept for completeness.)
     For a given student + date, change paid_status from Not Paid/blank/Unpaid
     to 'Paid'. Returns number of rows updated.
     """
@@ -454,12 +492,13 @@ def mark_tutor_notes_paid(ws, sunday_iso: str) -> int:
 
     return updated
 
-# ----------------- MONTHLY SUMMARY (BUSINESS + TUTORS) -----------------
+# ----------------- MONTHLY SUMMARY (BUSINESS + TUTORS + FREE COST) -----------------
 
 def update_tutor_summary_sheet(gc: gspread.Client, sheet_ref: str):
     """
     Rebuilds a 'tutor_summary' sheet that shows, per month:
       - Each tutor's total earnings
+      - Free Session Cost (what you paid out-of-pocket for free sessions)
       - Nitin Business Earnings (Nitin as tutor + profit share from others - free session costs)
     """
     if sheet_ref.startswith("http"):
@@ -482,6 +521,7 @@ def update_tutor_summary_sheet(gc: gspread.Client, sheet_ref: str):
     # month_tutor_totals["YYYY-MM"]["TutorName"] = amount
     month_tutor_totals: Dict[str, Dict[str, float]] = {}
     month_nitin_business: Dict[str, float] = {}
+    month_free_cost: Dict[str, float] = {}  # total you spent on free sessions
 
     for r in records:
         tutor = (r.get("tutor") or "").strip()
@@ -508,6 +548,7 @@ def update_tutor_summary_sheet(gc: gspread.Client, sheet_ref: str):
         if ym not in month_tutor_totals:
             month_tutor_totals[ym] = {}
             month_nitin_business[ym] = 0.0
+            month_free_cost[ym] = 0.0
 
         # Tutor earnings
         if tutor == "Nitin":
@@ -518,12 +559,15 @@ def update_tutor_summary_sheet(gc: gspread.Client, sheet_ref: str):
             else:
                 tutor_earn = 0.5 * amount_due
 
-        # Nitin business earnings
+        # Nitin business earnings + free session tracking
         if tutor == "Nitin":
             nitin_contrib = amount_due
         else:
             if is_free:
-                nitin_contrib = -0.5 * full_value
+                # you pay half of full_value on free session
+                free_cost = 0.5 * full_value
+                nitin_contrib = -free_cost
+                month_free_cost[ym] += free_cost
             else:
                 nitin_contrib = 0.5 * amount_due
 
@@ -538,6 +582,9 @@ def update_tutor_summary_sheet(gc: gspread.Client, sheet_ref: str):
         for tutor_name in sorted(month_tutor_totals[ym].keys()):
             total = month_tutor_totals[ym][tutor_name]
             rows.append([tutor_name, f"{total:.2f}", ""])
+
+        # Free session cost + business earnings
+        rows.append(["Free Session Cost", f"{month_free_cost[ym]:.2f}", ""])
         rows.append(["Nitin Business Earnings", f"{month_nitin_business[ym]:.2f}", ""])
         rows.append(["", "", ""])
 
