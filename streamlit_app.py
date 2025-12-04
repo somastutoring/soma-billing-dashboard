@@ -1,5 +1,5 @@
 # streamlit_app.py
-from datetime import datetime
+from datetime import datetime, timedelta
 import streamlit as st
 
 from billing_logic import (
@@ -15,7 +15,7 @@ from billing_logic import (
     mark_client_paid,
     mark_tutor_notes_paid,
     update_tutor_summary_sheet,
-    list_unpaid_sessions,  # <-- NEW IMPORT
+    list_unpaid_sessions,
 )
 
 # ---------------- PASSWORD GATE ----------------
@@ -86,6 +86,18 @@ def require_ws():
     if ws is None:
         st.error("❌ Google Sheet not connected.")
         st.stop()
+
+
+def get_default_sunday_str():
+    """
+    Return upcoming Sunday's date as ISO string.
+    If today is Sunday, returns today.
+    """
+    today = datetime.today().date()
+    weekday = today.weekday()  # 0=Mon, 6=Sun
+    days_until_sun = (6 - weekday) % 7
+    default_sunday = today + timedelta(days=days_until_sun)
+    return default_sunday.isoformat()
 
 # ---------------- TABS ----------------
 
@@ -215,7 +227,6 @@ with tab_client:
             if not unpaid:
                 st.success("🎉 All sessions are either Paid or Free.")
             else:
-                # Summary by student
                 totals = {}
                 for r in unpaid:
                     name = r["student_name"] or "(Unknown)"
@@ -235,9 +246,11 @@ with tab_client:
 with tab_weekly:
     st.subheader("Weekly Tutor Payroll (Sunday Pay)")
 
+    default_sunday_str = get_default_sunday_str()
     sunday_input = st.text_input(
         "Week Ending Sunday",
-        value=datetime.today().date().isoformat()
+        value=default_sunday_str,
+        help="Defaults to the upcoming Sunday (or today if today is Sunday).",
     )
 
     colw1, colw2 = st.columns(2)
