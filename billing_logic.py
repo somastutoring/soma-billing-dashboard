@@ -128,6 +128,43 @@ def list_unpaid_sessions(ws):
 
     return results
 
+def list_recent_sessions(ws, limit=10):
+    """
+    Return up to `limit` most recent sessions, based on date + id.
+    """
+    records = ws.get_all_records()
+    enriched = []
+    for i, r in enumerate(records):
+        date = (r.get("date") or "").strip()
+        sid = (r.get("id") or "").strip()
+        enriched.append((date, sid, i, r))
+
+    # Sort by date, then id, newest first
+    enriched.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+    return [e[3] for e in enriched[:limit]]
+
+
+def search_sessions_by_student_month(ws, student_name, year_month):
+    """
+    Return all sessions for a given student within a given year-month (YYYY-MM).
+
+    Example: year_month = '2025-11' → all November 2025 sessions.
+    """
+    ym = (year_month or "").strip()
+    target = (student_name or "").strip().lower()
+    if not ym or not target:
+        return []
+
+    records = ws.get_all_records()
+    results = []
+    for r in records:
+        sname = (r.get("student_name") or "").strip().lower()
+        date_str = (r.get("date") or "").strip()
+        if sname == target and date_str.startswith(ym):
+            results.append(r)
+    return results
+
 # ---------- Google Sheets connection ----------
 
 def create_gc_from_info(creds_info: dict):
@@ -450,4 +487,5 @@ def update_tutor_summary_sheet(gc, sheet_ref: str):
     if rows:
         summary_ws.update(f"A1:C{len(rows)}", rows)
     return rows
+
 
