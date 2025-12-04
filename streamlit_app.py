@@ -16,6 +16,8 @@ from billing_logic import (
     mark_tutor_notes_paid,
     update_tutor_summary_sheet,
     list_unpaid_sessions,
+    list_recent_sessions,               # NEW
+    search_sessions_by_student_month,   # NEW
 )
 
 # ---------------- PASSWORD GATE ----------------
@@ -187,7 +189,19 @@ with tab_log:
         except Exception as e:
             st.error(str(e))
 
-# ---------------- TAB 2: CLIENT PAYMENTS + UNPAID LIST ----------------
+    st.markdown("---")
+    st.markdown("### Recent Sessions (Newest First)")
+
+    try:
+        recent = list_recent_sessions(ws, limit=10)
+        if recent:
+            st.dataframe(recent)
+        else:
+            st.info("No sessions logged yet.")
+    except Exception as e:
+        st.error(f"Error loading recent sessions: {e}")
+
+# ---------------- TAB 2: CLIENT PAYMENTS + UNPAID + SEARCH ----------------
 
 with tab_client:
     st.subheader("Client Payments")
@@ -196,6 +210,7 @@ with tab_client:
     records = ws.get_all_records()
     students = sorted({r["student_name"] for r in records if r.get("student_name")})
 
+    # ---- Mark specific session paid ----
     st.markdown("### Mark a Specific Session as Paid")
 
     colc1, colc2 = st.columns(2)
@@ -219,6 +234,37 @@ with tab_client:
             st.error(str(e))
 
     st.markdown("---")
+
+    # ---- Search sessions by student + month ----
+    st.markdown("### Search Sessions by Student & Month")
+
+    cols_search = st.columns(2)
+    with cols_search[0]:
+        student_search = st.selectbox(
+            "Student (search)", students, key="student_search"
+        )
+    with cols_search[1]:
+        default_month = datetime.today().strftime("%Y-%m")
+        month_search = st.text_input(
+            "Month (YYYY-MM)", value=default_month, key="month_search"
+        )
+
+    if st.button("Search Sessions"):
+        try:
+            matches = search_sessions_by_student_month(ws, student_search, month_search)
+            if not matches:
+                st.info(f"No sessions found for {student_search} in {month_search}.")
+            else:
+                st.success(
+                    f"Found {len(matches)} session(s) for {student_search} in {month_search}."
+                )
+                st.dataframe(matches)
+        except Exception as e:
+            st.error(f"Error searching sessions: {e}")
+
+    st.markdown("---")
+
+    # ---- Unpaid list ----
     st.markdown("### Clients With Unpaid Sessions")
 
     if st.button("Show Unpaid Sessions"):
