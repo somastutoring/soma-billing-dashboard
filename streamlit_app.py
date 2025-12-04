@@ -12,12 +12,12 @@ from billing_logic import (
     parse_duration,
     append_session,
     compute_weekly_tutor_totals,
-    mark_client_paid,
     mark_tutor_notes_paid,
     update_tutor_summary_sheet,
     list_unpaid_sessions,
-    list_recent_sessions,               # NEW
-    search_sessions_by_student_month,   # NEW
+    list_recent_sessions,
+    search_sessions_by_student_month,
+    mark_session_paid_by_id,  # <-- NEW
 )
 
 # ---------------- PASSWORD GATE ----------------
@@ -57,7 +57,6 @@ st.title("Soma's Tutoring – Billing Dashboard")
 
 sheet_ref = st.secrets.get("sheet_ref", "").strip()
 
-# Legacy clients now hidden in secrets too
 legacy_default = ["Brie", "Rafi", "Caylee", "Rishi"]
 legacy_secret = st.secrets.get("legacy_clients", legacy_default)
 
@@ -91,10 +90,6 @@ def require_ws():
 
 
 def get_default_sunday_str():
-    """
-    Return upcoming Sunday's date as ISO string.
-    If today is Sunday, returns today.
-    """
     today = datetime.today().date()
     weekday = today.weekday()  # 0=Mon, 6=Sun
     days_until_sun = (6 - weekday) % 7
@@ -201,7 +196,7 @@ with tab_log:
     except Exception as e:
         st.error(f"Error loading recent sessions: {e}")
 
-# ---------------- TAB 2: CLIENT PAYMENTS + UNPAID + SEARCH ----------------
+# ---------------- TAB 2: CLIENT PAYMENTS (SEARCH + UNPAID CLICK-TO-PAID) ----------------
 
 with tab_client:
     st.subheader("Client Payments")
@@ -209,31 +204,6 @@ with tab_client:
 
     records = ws.get_all_records()
     students = sorted({r["student_name"] for r in records if r.get("student_name")})
-
-    # ---- Mark specific session paid ----
-    st.markdown("### Mark a Specific Session as Paid")
-
-    colc1, colc2 = st.columns(2)
-    with colc1:
-        student_pick = st.selectbox("Student", students)
-    with colc2:
-        date_cp = st.text_input(
-            "Session Date", value=datetime.today().date().isoformat()
-        )
-
-    if st.button("Mark Client Paid"):
-        try:
-            date_iso = parse_date(date_cp)
-            count = mark_client_paid(ws, student_pick, date_iso)
-            update_tutor_summary_sheet(gc, sheet_ref)
-            if count == 0:
-                st.info("No matching sessions found or already Paid.")
-            else:
-                st.success(f"{count} session(s) updated to Paid.")
-        except Exception as e:
-            st.error(str(e))
-
-    st.markdown("---")
 
     # ---- Search sessions by student + month ----
     st.markdown("### Search Sessions by Student & Month")
@@ -264,28 +234,49 @@ with tab_client:
 
     st.markdown("---")
 
-    # ---- Unpaid list ----
+    # ---- Unpaid list + click to mark paid ----
     st.markdown("### Clients With Unpaid Sessions")
 
-    if st.button("Show Unpaid Sessions"):
-        try:
-            unpaid = list_unpaid_sessions(ws)
-            if not unpaid:
-                st.success("🎉 All sessions are either Paid or Free.")
-            else:
-                totals = {}
-                for r in unpaid:
-                    name = r["student_name"] or "(Unknown)"
-                    totals[name] = totals.get(name, 0.0) + r["amount_due"]
+    unpaid = []
+    try:
+        unpaid = list_unpaid_sessions(ws)
+    except Exception as e:
+        st.error(f"Error loading unpaid sessions: {e}")
 
-                st.markdown("**Unpaid totals by student:**")
-                for name, amt in sorted(totals.items()):
-                    st.write(f"- **{name}**: ${amt:.2f}")
+    if not unpaid:
+        st.success("🎉 All sessions are either Paid or Free.")
+    else:
+        st.markdown("**Unpaid totals by student:**")
+        totals = {}
+        for r in unpaid:
+            name = r["student_name"] or "(Unknown)"
+            totals[name] = totals.get(name, 0.0) + r["amount_due"]
+        for name, amt in sorted(totals.items()):
+            st.write(f"- **{name}**: ${amt:.2f}")
 
-                st.markdown("**Unpaid session details:**")
-                st.dataframe(unpaid)
-        except Exception as e:
-            st.error(str(e))
+        st.markdown("**Unpaid session details:**")
+        st.dataframe(unpaid)
+
+        unpaid_ids = [r["id"] for r in unpaid if r.get("id")]
+        if unpaid_ids:
+            selected_id = st.selectbox(
+                "Select a session ID to mark as Paid",
+                unpaid_ids,
+                format_func=lambda x: x if x else "(no id)",
+            )
+
+            if st.button("Mark Selected Session Paid"):
+                try:
+                    updated = mark_session_paid_by_id(ws, selected_id)
+                    update_tutor_summary_sheet(gc, sheet_ref)
+                    if updated:
+                        st.success(f"Session {selected_id} marked as Paid.")
+                    else:
+                        st.info("No session updated (maybe already Paid).")
+                except Exception as e:
+                    st.error(f"Error updating session: {e}")
+        else:
+            st.info("Unpaid sessions have no IDs; cannot mark by click. Check sheet IDs.")
 
 # ---------------- TAB 3: WEEKLY PAYROLL ----------------
 
