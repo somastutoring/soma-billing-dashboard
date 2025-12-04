@@ -84,7 +84,49 @@ def get_rate_for_student(student_name: str, service_name: str,
     if student_name.strip().lower() in legacy_lower:
         return "Legacy", LEGACY_RATES[service_name]
     return "New", NEW_RATES[service_name][mode_name]
+                             
 
+def list_unpaid_sessions(ws):
+    """
+    Return a list of session dicts where the client still owes money.
+
+    Treat as unpaid if:
+      - paid_status is blank, 'Not Paid', 'Unpaid' (case-insensitive)
+    Ignore:
+      - 'Paid'
+      - 'Free session'
+    """
+    records = ws.get_all_records()
+    results = []
+
+    for r in records:
+        status_raw = (r.get("paid_status") or "").strip()
+        status = status_raw.lower()
+
+        if status in ("paid", "free session"):
+            continue
+
+        if status not in ("not paid", "unpaid", ""):
+            # Anything weird we also skip to be safe
+            continue
+
+        try:
+            amt = float(r.get("amount_due") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+
+        results.append(
+            {
+                "student_name": r.get("student_name", ""),
+                "date": r.get("date", ""),
+                "service": r.get("service", ""),
+                "tutor": r.get("tutor", ""),
+                "amount_due": amt,
+                "paid_status": status_raw,
+            }
+        )
+
+    return results
 
 # ---------- Google Sheets connection ----------
 
@@ -408,3 +450,4 @@ def update_tutor_summary_sheet(gc, sheet_ref: str):
     if rows:
         summary_ws.update(f"A1:C{len(rows)}", rows)
     return rows
+
