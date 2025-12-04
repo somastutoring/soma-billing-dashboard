@@ -1,7 +1,12 @@
 # billing_logic.py
+
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Tuple
+
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime, timedelta
+
+# ----------------- CONSTANTS / CONFIG -----------------
 
 SHEET_TAB = "sessions"
 
@@ -22,159 +27,41 @@ COLUMNS = [
 ]
 
 SERVICES = ["K–12 Tutoring", "SAT & ACT Prep", "College & AP Courses"]
-MODES    = ["Online", "In-Person"]
+MODES = ["Online", "In-Person"]
 PAID_OPTIONS = ["Not Paid", "Paid", "Free session"]
 
+# Legacy = same rate regardless of mode (hourly)
 LEGACY_RATES = {
-    "K–12 Tutoring":        25.0,
-    "SAT & ACT Prep":       35.0,
+    "K–12 Tutoring": 25.0,
+    "SAT & ACT Prep": 35.0,
     "College & AP Courses": 30.0,
 }
 
+# NEW = mode-specific hourly rates
 NEW_RATES = {
-    "K–12 Tutoring":        {"Online": 30.0, "In-Person": 40.0},
-    "SAT & ACT Prep":       {"Online": 35.0, "In-Person": 45.0},
+    "K–12 Tutoring": {"Online": 30.0, "In-Person": 40.0},
+    "SAT & ACT Prep": {"Online": 35.0, "In-Person": 45.0},
     "College & AP Courses": {"Online": 40.0, "In-Person": 50.0},
 }
 
+# ----------------- GOOGLE SHEETS HELPERS -----------------
 
-# ---------- Basic helpers ----------
-
-def parse_date(s: str) -> str:
-    s = (s or "").strip()
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(s, fmt).date().isoformat()
-        except ValueError:
-            pass
-    raise ValueError("Date must be YYYY-MM-DD or MM/DD/YYYY")
-
-
-def parse_duration(minutes_text: str, hhmm_text: str) -> int:
-    minutes_text = (minutes_text or "").strip()
-    hhmm_text = (hhmm_text or "").strip()
-    if minutes_text and hhmm_text:
-        raise ValueError("Fill either Minutes OR HH:MM, not both.")
-    if not minutes_text and not hhmm_text:
-        raise ValueError("Enter Minutes OR HH:MM.")
-    if minutes_text:
-        m = int(minutes_text)
-        if m <= 0:
-            raise ValueError("Minutes must be positive.")
-        return m
-    if ":" not in hhmm_text:
-        raise ValueError("HH:MM must include a colon, e.g. 1:30")
-    h, m = hhmm_text.split(":", 1)
-    h, m = int(h), int(m)
-    if not (0 <= m < 60):
-        raise ValueError("MM must be 0-59.")
-    total = h * 60 + m
-    if total <= 0:
-        raise ValueError("Duration must be positive.")
-    return total
-
-
-def hours_from_minutes(total_minutes: int) -> float:
-    return round(total_minutes / 60.0, 2)
-
-
-def get_rate_for_student(student_name: str, service_name: str,
-                         mode_name: str, legacy_list):
-    legacy_lower = [x.strip().lower() for x in legacy_list]
-    if student_name.strip().lower() in legacy_lower:
-        return "Legacy", LEGACY_RATES[service_name]
-    return "New", NEW_RATES[service_name][mode_name]
-                             
-
-def list_unpaid_sessions(ws):
+def create_gc_from_info(info: Dict[str, Any]) -> gspread.Client:
     """
-    Return a list of session dicts where the client still owes money.
-
-    Treat as unpaid if:
-      - paid_status is blank, 'Not Paid', 'Unpaid' (case-insensitive)
-    Ignore:
-      - 'Paid'
-      - 'Free session'
+    info comes from Streamlit secrets: st.secrets["gcp_service_account"]
     """
-    records = ws.get_all_records()
-    results = []
-
-    for r in records:
-        status_raw = (r.get("paid_status") or "").strip()
-        status = status_raw.lower()
-
-        if status in ("paid", "free session"):
-            continue
-
-        if status not in ("not paid", "unpaid", ""):
-            # Anything weird we also skip to be safe
-            continue
-
-        try:
-            amt = float(r.get("amount_due") or 0)
-        except (TypeError, ValueError):
-            amt = 0.0
-
-        results.append(
-            {
-                "student_name": r.get("student_name", ""),
-                "date": r.get("date", ""),
-                "service": r.get("service", ""),
-                "tutor": r.get("tutor", ""),
-                "amount_due": amt,
-                "paid_status": status_raw,
-            }
-        )
-
-    return results
-
-def list_recent_sessions(ws, limit=10):
-    """
-    Return up to `limit` most recent sessions, based on date + id.
-    """
-    records = ws.get_all_records()
-    enriched = []
-    for i, r in enumerate(records):
-        date = (r.get("date") or "").strip()
-        sid = (r.get("id") or "").strip()
-        enriched.append((date, sid, i, r))
-
-    # Sort by date, then id, newest first
-    enriched.sort(key=lambda x: (x[0], x[1]), reverse=True)
-
-    return [e[3] for e in enriched[:limit]]
-
-
-def search_sessions_by_student_month(ws, student_name, year_month):
-    """
-    Return all sessions for a given student within a given year-month (YYYY-MM).
-
-    Example: year_month = '2025-11' → all November 2025 sessions.
-    """
-    ym = (year_month or "").strip()
-    target = (student_name or "").strip().lower()
-    if not ym or not target:
-        return []
-
-    records = ws.get_all_records()
-    results = []
-    for r in records:
-        sname = (r.get("student_name") or "").strip().lower()
-        date_str = (r.get("date") or "").strip()
-        if sname == target and date_str.startswith(ym):
-            results.append(r)
-    return results
-
-# ---------- Google Sheets connection ----------
-
-def create_gc_from_info(creds_info: dict):
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
 
-def open_or_create_sheet(gc, sheet_ref: str):
-    """Return (spreadsheet, sessions_ws)."""
+def open_or_create_sheet(gc: gspread.Client, sheet_ref: str):
+    """
+    sheet_ref is either:
+      - Full Spreadsheet URL, or
+      - Spreadsheet title in Drive.
+    Ensures a 'sessions' worksheet exists with the proper columns.
+    """
     if sheet_ref.startswith("http"):
         sh = gc.open_by_url(sheet_ref)
     else:
@@ -196,32 +83,123 @@ def open_or_create_sheet(gc, sheet_ref: str):
 
     return sh, ws
 
+# ----------------- DATE & DURATION PARSING -----------------
 
-# ---------- Session creation / math ----------
+def parse_date(s: str) -> str:
+    """
+    Accepts 'YYYY-MM-DD' or 'MM/DD/YYYY'.
+    Returns ISO date 'YYYY-MM-DD'.
+    """
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            pass
+    raise ValueError("Date must be YYYY-MM-DD or MM/DD/YYYY")
 
-def compute_session_financials(student: str, service: str, mode: str,
-                               minutes: int, paid_status: str,
-                               tutor: str, legacy_clients):
-    """Return dict with tier, hourly_rate, hours, full_amount, amount_due, tutor_pay, notes."""
+
+def parse_duration(minutes_text: str, hhmm_text: str) -> int:
+    """
+    One of minutes_text OR hhmm_text must be provided.
+    """
+    minutes_text = (minutes_text or "").strip()
+    hhmm_text = (hhmm_text or "").strip()
+
+    if minutes_text and hhmm_text:
+        raise ValueError("Fill either Minutes OR HH:MM, not both.")
+
+    if not minutes_text and not hhmm_text:
+        raise ValueError("Enter Minutes OR HH:MM.")
+
+    if minutes_text:
+        m = int(minutes_text)
+        if m <= 0:
+            raise ValueError("Minutes must be positive.")
+        return m
+
+    if ":" not in hhmm_text:
+        raise ValueError("HH:MM must include a colon, e.g. 1:30")
+
+    h, m = hhmm_text.split(":", 1)
+    h, m = int(h), int(m)
+    if not (0 <= m < 60):
+        raise ValueError("MM must be 0-59.")
+
+    total = h * 60 + m
+    if total <= 0:
+        raise ValueError("Duration must be positive.")
+    return total
+
+
+def hours_from_minutes(total_minutes: int) -> float:
+    return round(total_minutes / 60.0, 2)
+
+# ----------------- RATES & PRICING -----------------
+
+def get_rate_for_student(
+    student_name: str,
+    service_name: str,
+    mode_name: str,
+    legacy_clients: List[str],
+) -> Tuple[str, float]:
+    """
+    Return (tier, hourly_rate):
+      - 'Legacy' uses LEGACY_RATES
+      - 'New' uses NEW_RATES with mode-specific rates
+    """
+    legacy_lower = [x.strip().lower() for x in legacy_clients]
+    if student_name.strip().lower() in legacy_lower:
+        return "Legacy", LEGACY_RATES[service_name]
+    return "New", NEW_RATES[service_name][mode_name]
+
+
+def append_session(
+    ws,
+    student: str,
+    date_iso: str,
+    minutes: int,
+    service: str,
+    mode: str,
+    tutor: str,
+    paid_status: str,
+    legacy_clients: List[str],
+) -> Dict[str, Any]:
+    """
+    Core logic that:
+      - Computes tier, hourly_rate, amount_due, tutor_pay
+      - Builds 'Pay <Tutor> $X.XX' notes
+      - Appends the row to the 'sessions' sheet.
+
+    Returns a dict with keys:
+      'tier', 'hourly_rate', 'amount_due', 'tutor_pay', 'notes'
+    """
     if service not in LEGACY_RATES:
         raise ValueError("Invalid service.")
-
     if mode not in MODES:
         raise ValueError("Invalid mode.")
+    if not student:
+        raise ValueError("Student cannot be empty.")
+    if not tutor:
+        raise ValueError("Tutor cannot be empty.")
 
-    minutes_val = minutes
-    hours = hours_from_minutes(minutes_val)
-
+    hours_decimal = hours_from_minutes(minutes)
     tier, hourly_rate = get_rate_for_student(student, service, mode, legacy_clients)
-    full_amount = round(hours * hourly_rate, 2)
 
-    is_free = (paid_status or "").strip().lower().startswith("free")
+    full_amount = round(hours_decimal * hourly_rate, 2)
+    paid_status = (paid_status or "Not Paid").strip()
+    is_free = paid_status.lower().startswith("free")
+
     if is_free:
-        amount_due = 0.0
+        amount_due = 0.00
     else:
         amount_due = full_amount
 
-    # Tutor pay rules
+    # Tutor pay rules:
+    # - Nitin: 100% of amount_due
+    # - Others:
+    #     * Free:  50% of full_amount
+    #     * Paid:  50% of amount_due
     if tutor == "Nitin":
         tutor_pay = amount_due
     else:
@@ -232,113 +210,180 @@ def compute_session_financials(student: str, service: str, mode: str,
 
     notes = f"Pay {tutor} ${tutor_pay:.2f}"
 
+    # Build unique id
+    existing = ws.get_all_records()
+    serial = (
+        sum(
+            1
+            for r in existing
+            if (r.get("date", "") == date_iso)
+            and (r.get("student_name", "") or "").strip().lower()
+            == student.lower()
+        )
+        + 1
+    )
+    rid = f"{date_iso.replace('-','')}-{student.lower().replace(' ','_')}-{serial}"
+
+    header = ws.row_values(1)
+    if header != COLUMNS:
+        last_col_letter = chr(ord("A") + len(COLUMNS) - 1)
+        ws.update(f"A1:{last_col_letter}1", [COLUMNS])
+
+    ws.append_row(
+        [
+            rid,
+            student,
+            date_iso,
+            str(minutes),
+            f"{hours_decimal:.2f}",
+            service,
+            mode,
+            tutor,
+            notes,
+            tier,
+            f"{hourly_rate:.2f}",
+            f"{amount_due:.2f}",
+            paid_status,
+        ]
+    )
+
     return {
-        "hours_decimal": hours,
         "tier": tier,
         "hourly_rate": hourly_rate,
-        "full_amount": full_amount,
         "amount_due": amount_due,
         "tutor_pay": tutor_pay,
         "notes": notes,
     }
 
+# ----------------- UNPAID / CLIENT PAYMENT LOGIC -----------------
 
-def append_session(ws, student: str, date_iso: str, minutes: int,
-                   service: str, mode: str, tutor: str,
-                   paid_status: str, legacy_clients):
-    """Append a new session row to the sessions sheet."""
-    financials = compute_session_financials(
-        student, service, mode, minutes, paid_status, tutor, legacy_clients
-    )
+def list_unpaid_sessions(ws) -> List[Dict[str, Any]]:
+    """
+    Return a list of session dicts where the client still owes money.
 
+    Treat as unpaid if:
+      - paid_status is blank, 'Not Paid', 'Unpaid' (case-insensitive)
+    Ignore:
+      - 'Paid'
+      - 'Free session'
+    """
     records = ws.get_all_records()
-    serial = sum(
-        1
-        for r in records
-        if (
-            (r.get("date", "") or "") == date_iso
-            and (r.get("student_name", "") or "").strip().lower() == student.lower()
+    results = []
+
+    for r in records:
+        status_raw = (r.get("paid_status") or "").strip()
+        status = status_raw.lower()
+
+        if status in ("paid", "free session"):
+            continue
+
+        if status not in ("not paid", "unpaid", ""):
+            # Ignore weird statuses
+            continue
+
+        try:
+            amt = float(r.get("amount_due") or 0)
+        except (TypeError, ValueError):
+            amt = 0.0
+
+        results.append(
+            {
+                "student_name": r.get("student_name", ""),
+                "date": r.get("date", ""),
+                "service": r.get("service", ""),
+                "tutor": r.get("tutor", ""),
+                "amount_due": amt,
+                "paid_status": status_raw,
+            }
         )
-    ) + 1
 
-    rid = f"{date_iso.replace('-','')}-{student.lower().replace(' ','_')}-{serial}"
-
-    row = [
-        rid,
-        student,
-        date_iso,
-        str(minutes),
-        f"{financials['hours_decimal']:.2f}",
-        service,
-        mode,
-        tutor,
-        financials["notes"],
-        financials["tier"],
-        f"{financials['hourly_rate']:.2f}",
-        f"{financials['amount_due']:.2f}",
-        paid_status,
-    ]
-    ws.append_row(row)
-    return financials
+    return results
 
 
-# ---------- Client paid / tutor notes updates ----------
+def mark_client_paid(ws, student_name: str, date_iso: str) -> int:
+    """
+    For a given student + date, change paid_status from Not Paid/blank/Unpaid
+    to 'Paid'. Returns number of rows updated.
+    """
+    student_name = (student_name or "").strip()
+    date_iso = (date_iso or "").strip()
+    if not student_name or not date_iso:
+        return 0
 
-def mark_client_paid(ws, student: str, date_iso: str) -> int:
-    """Set paid_status='Paid' for matching student+date rows. Returns count updated."""
-    records = ws.get_all_records()
-    paid_col = COLUMNS.index("paid_status") + 1
+    header = ws.row_values(1)
+    try:
+        paid_idx = header.index("paid_status") + 1  # 1-based
+        date_idx = header.index("date") + 1
+        student_idx = header.index("student_name") + 1
+    except ValueError:
+        return 0
 
+    all_values = ws.get_all_values()
     updated = 0
-    for idx, r in enumerate(records, start=2):
-        r_date = (r.get("date", "") or "").strip()
-        r_student = (r.get("student_name", "") or "").strip()
 
-        if r_date == date_iso and r_student.lower() == student.lower():
-            cur_status = (r.get("paid_status", "") or "").strip().lower()
-            if cur_status == "paid":
-                continue
-            ws.update_cell(idx, paid_col, "Paid")
-            updated += 1
+    for row_num in range(2, len(all_values) + 1):
+        row = all_values[row_num - 1]
+        if len(row) < max(paid_idx, date_idx, student_idx):
+            continue
+
+        r_date = (row[date_idx - 1] or "").strip()
+        r_student = (row[student_idx - 1] or "").strip()
+        r_status = (row[paid_idx - 1] or "").strip().lower()
+
+        if r_date == date_iso and r_student.lower() == student_name.lower():
+            if r_status in ("", "not paid", "unpaid"):
+                ws.update_cell(row_num, paid_idx, "Paid")
+                updated += 1
+
     return updated
 
+# ----------------- WEEKLY PAYROLL LOGIC -----------------
 
 def _week_range_from_sunday(sunday_iso: str):
-    end_dt = datetime.fromisoformat(sunday_iso)
-    start_dt = end_dt - timedelta(days=6)
-    return start_dt.date(), end_dt.date()
+    """
+    Given week-ending Sunday date (YYYY-MM-DD),
+    return (monday_iso, sunday_iso) for that week.
+    """
+    sunday = datetime.strptime(sunday_iso, "%Y-%m-%d").date()
+    monday = sunday - timedelta(days=6)
+    return monday.isoformat(), sunday.isoformat()
 
 
-def iter_week_rows(ws, sunday_iso: str):
-    """Yield (row_idx, record) for rows in Monday–Sunday week, non-Nitin tutors."""
-    start_date, end_date = _week_range_from_sunday(sunday_iso)
+def compute_weekly_tutor_totals(ws, sunday_iso: str) -> Dict[str, Any]:
+    """
+    Compute weekly totals for *non-Nitin* tutors for payroll.
+
+    Returns:
+    {
+      "start": monday_iso,
+      "end": sunday_iso,
+      "totals": { "Aryan": 123.45, "Neha": 67.89, ... }
+    }
+    """
+    start_iso, end_iso = _week_range_from_sunday(sunday_iso)
+    start_dt = datetime.strptime(start_iso, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(end_iso, "%Y-%m-%d").date()
+
     records = ws.get_all_records()
+    totals: Dict[str, float] = {}
 
-    for idx, r in enumerate(records, start=2):
-        tutor = (r.get("tutor", "") or "").strip()
+    for r in records:
+        tutor = (r.get("tutor") or "").strip()
         if not tutor or tutor == "Nitin":
             continue
-        date_str = (r.get("date", "") or "").strip()
+
+        date_str = (r.get("date") or "").strip()
         if not date_str:
             continue
+
         try:
-            d = datetime.fromisoformat(date_str).date()
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
             continue
-        if start_date <= d <= end_date:
-            yield idx, r
 
+        if not (start_dt <= d <= end_dt):
+            continue
 
-def compute_weekly_tutor_totals(ws, sunday_iso: str):
-    """
-    Returns dict tutor -> amount owed (for non-Nitin tutors)
-    based on your pay rules.
-    """
-    totals = {}
-    start_date, end_date = _week_range_from_sunday(sunday_iso)
-
-    for _, r in iter_week_rows(ws, sunday_iso):
-        tutor = (r.get("tutor", "") or "").strip()
         try:
             hours_decimal = float(r.get("hours_decimal") or 0)
             rate = float(r.get("rate") or 0)
@@ -346,48 +391,76 @@ def compute_weekly_tutor_totals(ws, sunday_iso: str):
         except (TypeError, ValueError):
             continue
 
-        paid_status = (r.get("paid_status", "") or "").strip()
-        is_free = paid_status.lower().startswith("free")
+        paid_status = (r.get("paid_status") or "").strip().lower()
+        is_free = paid_status.startswith("free")
         full_value = hours_decimal * rate
 
+        # Tutor earnings for non-Nitin:
+        #  - Free:  50% of full_value
+        #  - Paid:  50% of amount_due
         if is_free:
-            tutor_pay = 0.5 * full_value
+            tutor_earn = 0.5 * full_value
         else:
-            tutor_pay = 0.5 * amount_due
+            tutor_earn = 0.5 * amount_due
 
-        totals[tutor] = totals.get(tutor, 0.0) + tutor_pay
+        totals[tutor] = totals.get(tutor, 0.0) + tutor_earn
 
-    return {
-        "start": start_date.isoformat(),
-        "end": end_date.isoformat(),
-        "totals": totals,
-    }
+    return {"start": start_iso, "end": end_iso, "totals": totals}
 
 
 def mark_tutor_notes_paid(ws, sunday_iso: str) -> int:
     """
-    For the given week, flip 'Pay <Tutor> $X' -> 'Paid <Tutor> $X' for non-Nitin tutors.
-    Returns count updated.
+    For all sessions in the given week (Mon–Sun) with notes like
+    'Pay Aryan $X.XX', change that note to 'Paid Aryan $X.XX'.
+
+    Returns number of rows updated.
     """
-    notes_col = COLUMNS.index("notes") + 1
+    start_iso, end_iso = _week_range_from_sunday(sunday_iso)
+    start_dt = datetime.strptime(start_iso, "%Y-%m-%d").date()
+    end_dt = datetime.strptime(end_iso, "%Y-%m-%d").date()
+
+    header = ws.row_values(1)
+    try:
+        notes_idx = header.index("notes") + 1
+        date_idx = header.index("date") + 1
+    except ValueError:
+        return 0
+
+    all_values = ws.get_all_values()
     updated = 0
 
-    for row_idx, r in iter_week_rows(ws, sunday_iso):
-        notes = (r.get("notes", "") or "")
-        if notes.startswith("Pay "):
-            new_notes = "Paid " + notes[4:]
-            ws.update_cell(row_idx, notes_col, new_notes)
+    for row_num in range(2, len(all_values) + 1):
+        row = all_values[row_num - 1]
+        if len(row) < max(notes_idx, date_idx):
+            continue
+
+        r_date = (row[date_idx - 1] or "").strip()
+        r_notes = (row[notes_idx - 1] or "").strip()
+
+        if not r_date:
+            continue
+
+        try:
+            d = datetime.strptime(r_date, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+
+        if not (start_dt <= d <= end_dt):
+            continue
+
+        if r_notes.startswith("Pay "):
+            ws.update_cell(row_num, notes_idx, r_notes.replace("Pay ", "Paid ", 1))
             updated += 1
+
     return updated
 
+# ----------------- MONTHLY SUMMARY (BUSINESS + TUTORS) -----------------
 
-# ---------- Monthly tutor summary sheet ----------
-
-def update_tutor_summary_sheet(gc, sheet_ref: str):
+def update_tutor_summary_sheet(gc: gspread.Client, sheet_ref: str):
     """
-    Build/refresh 'tutor_summary' with, per month:
-      - Tutor earnings (what each tutor gets paid)
-      - Nitin Business Earnings
+    Rebuilds a 'tutor_summary' sheet that shows, per month:
+      - Each tutor's total earnings
+      - Nitin Business Earnings (Nitin as tutor + profit share from others - free session costs)
     """
     if sheet_ref.startswith("http"):
         sh = gc.open_by_url(sheet_ref)
@@ -397,26 +470,29 @@ def update_tutor_summary_sheet(gc, sheet_ref: str):
     try:
         ws = sh.worksheet(SHEET_TAB)
     except gspread.WorksheetNotFound:
-        return  # nothing to do
+        return []
+
+    records = ws.get_all_records()
 
     try:
         summary_ws = sh.worksheet("tutor_summary")
     except gspread.WorksheetNotFound:
         summary_ws = sh.add_worksheet(title="tutor_summary", rows=200, cols=3)
 
-    records = ws.get_all_records()
-
-    month_tutor_totals = {}    # { 'YYYY-MM': { tutor: total } }
-    month_nitin_business = {}  # { 'YYYY-MM': total }
+    # month_tutor_totals["YYYY-MM"]["TutorName"] = amount
+    month_tutor_totals: Dict[str, Dict[str, float]] = {}
+    month_nitin_business: Dict[str, float] = {}
 
     for r in records:
-        tutor = (r.get("tutor", "") or "").strip()
+        tutor = (r.get("tutor") or "").strip()
         if not tutor:
             continue
-        date_str = (r.get("date", "") or "").strip()
+
+        date_str = (r.get("date") or "").strip()
         if len(date_str) < 7:
             continue
-        ym = date_str[:7]  # 'YYYY-MM'
+
+        ym = date_str[:7]  # YYYY-MM
 
         try:
             hours_decimal = float(r.get("hours_decimal") or 0)
@@ -425,9 +501,13 @@ def update_tutor_summary_sheet(gc, sheet_ref: str):
         except (TypeError, ValueError):
             continue
 
-        paid_status = (r.get("paid_status", "") or "").strip()
-        is_free = paid_status.lower().startswith("free")
+        paid_status = (r.get("paid_status") or "").strip().lower()
+        is_free = paid_status.startswith("free")
         full_value = hours_decimal * rate
+
+        if ym not in month_tutor_totals:
+            month_tutor_totals[ym] = {}
+            month_nitin_business[ym] = 0.0
 
         # Tutor earnings
         if tutor == "Nitin":
@@ -447,45 +527,58 @@ def update_tutor_summary_sheet(gc, sheet_ref: str):
             else:
                 nitin_contrib = 0.5 * amount_due
 
-        if ym not in month_tutor_totals:
-            month_tutor_totals[ym] = {}
-            month_nitin_business[ym] = 0.0
-
-        month_tutor_totals[ym][tutor] = (
-            month_tutor_totals[ym].get(tutor, 0.0) + tutor_earn
-        )
-        month_nitin_business[ym] += nitin_contrib
+        month_tutor_totals[ym][tutor] = month_tutor_totals[ym].get(tutor, 0.0) + tutor_earn
+        month_nitin_business[ym] = month_nitin_business.get(ym, 0.0) + nitin_contrib
 
     # Build rows
-    rows = []
-    from datetime import datetime as _dt
-
+    rows: List[List[str]] = []
     for ym in sorted(month_tutor_totals.keys()):
-        try:
-            label = _dt.strptime(ym, "%Y-%m").strftime("%B %Y")
-        except ValueError:
-            label = ym
-
-        rows.append([label, "", ""])
+        rows.append([f"Month: {ym}", "", ""])
         rows.append(["Tutor", "Tutor Earnings", ""])
-
-        tutors_for_month = month_tutor_totals.get(ym, {})
-        for tutor_name in sorted(tutors_for_month.keys()):
-            total = tutors_for_month[tutor_name]
+        for tutor_name in sorted(month_tutor_totals[ym].keys()):
+            total = month_tutor_totals[ym][tutor_name]
             rows.append([tutor_name, f"{total:.2f}", ""])
-
-        rows.append(
-            [
-                "Nitin Business Earnings",
-                f"{month_nitin_business.get(ym, 0.0):.2f}",
-                "",
-            ]
-        )
+        rows.append(["Nitin Business Earnings", f"{month_nitin_business[ym]:.2f}", ""])
         rows.append(["", "", ""])
 
     summary_ws.clear()
     if rows:
         summary_ws.update(f"A1:C{len(rows)}", rows)
+
     return rows
 
+# ----------------- RECENT SESSIONS & SEARCH -----------------
 
+def list_recent_sessions(ws, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Return up to `limit` most recent sessions, based on date + id.
+    """
+    records = ws.get_all_records()
+    enriched = []
+    for i, r in enumerate(records):
+        date = (r.get("date") or "").strip()
+        sid = (r.get("id") or "").strip()
+        enriched.append((date, sid, i, r))
+
+    enriched.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [e[3] for e in enriched[:limit]]
+
+
+def search_sessions_by_student_month(ws, student_name: str, year_month: str) -> List[Dict[str, Any]]:
+    """
+    Return all sessions for a given student within a given year-month (YYYY-MM).
+    Example: year_month = '2025-11'
+    """
+    ym = (year_month or "").strip()
+    target = (student_name or "").strip().lower()
+    if not ym or not target:
+        return []
+
+    records = ws.get_all_records()
+    results = []
+    for r in records:
+        sname = (r.get("student_name") or "").strip().lower()
+        date_str = (r.get("date") or "").strip()
+        if sname == target and date_str.startswith(ym):
+            results.append(r)
+    return results
