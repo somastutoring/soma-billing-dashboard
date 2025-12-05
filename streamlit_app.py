@@ -1,5 +1,6 @@
 # streamlit_app.py
-from datetime import datetime, timedelta
+
+from datetime import datetime, timedelta, time
 import streamlit as st
 
 from billing_logic import (
@@ -17,8 +18,12 @@ from billing_logic import (
     list_unpaid_sessions,
     list_recent_sessions,
     search_sessions_by_student_month,
-    mark_session_paid_by_id,  # <-- NEW
+    mark_session_paid_by_id,
+    save_student_email,
+    get_student_email,
 )
+
+from zoom_integration import create_zoom_meeting  # separate file
 
 # ---------------- PASSWORD GATE ----------------
 
@@ -82,6 +87,9 @@ else:
     st.error("❌ Missing Google credentials or sheet_ref in secrets.")
     st.stop()
 
+# Zoom config (can be empty if you haven't wired Zoom yet)
+zoom_cfg = dict(st.secrets.get("zoom", {}))
+
 
 def require_ws():
     if ws is None:
@@ -124,12 +132,18 @@ with tab_log:
             else student_pick
         )
 
+        # Email input for new students only
+        new_student_email = ""
+        if student_pick == "➕ New student…":
+            new_student_email = st.text_input("New student email (for Zoom invites)", "")
+
         date_str = st.text_input("Date", value=datetime.today().date().isoformat())
         service = st.selectbox("Service", SERVICES)
 
     with col2:
         minutes_text = st.text_input("Minutes", "")
         hhmm_text = st.text_input("HH:MM", "")
+        session_time = st.time_input("Session Start Time", value=time(18, 0))
         mode = st.selectbox("Mode", MODES)
 
     col3, col4 = st.columns(2)
@@ -150,6 +164,8 @@ with tab_log:
     with col4:
         paid_status = st.selectbox("Paid Status", PAID_OPTIONS)
 
+    create_zoom = st.checkbox("Create Zoom meeting for this session?", value=False)
+
     if st.button("Submit Session", type="primary"):
         try:
             if not student.strip():
@@ -162,6 +178,40 @@ with tab_log:
             date_iso = parse_date(date_str)
             minutes_val = parse_duration(minutes_text, hhmm_text)
 
+            # 1) Save / update email for new student
+            if student_pick == "➕ New student…":
+                if new_student_email.strip():
+                    save_student_email(sh, student.strip(), new_student_email.strip())
+
+            # 2) Look up email for existing student
+            student_email = get_student_email(sh, student.strip())
+
+            # 3) Optionally create Zoom meeting
+            zoom_link = ""
+            if create_zoom:
+                if not zoom_cfg:
+                    st.error("Zoom config missing in secrets; cannot create meeting.")
+                    st.stop()
+
+                if not student_email:
+                    st.warning(
+                        "No email found for this student in 'clients' sheet. "
+                        "Meeting will be created but no automatic invite is sent."
+                    )
+
+                # Combine date + time (no timezone; Zoom uses account timezone)
+                session_date = datetime.strptime(date_iso, "%Y-%m-%d").date()
+                dt = datetime.combine(session_date, session_time)
+                start_time_iso = dt.isoformat()
+
+                topic = f"{student} – {service}"
+                zoom_link = create_zoom_meeting(
+                    zoom_cfg=zoom_cfg,
+                    topic=topic,
+                    start_time_iso=start_time_iso,
+                    duration_minutes=minutes_val,
+                )
+
             fin = append_session(
                 ws=ws,
                 student=student.strip(),
@@ -172,15 +222,21 @@ with tab_log:
                 tutor=tutor.strip(),
                 paid_status=paid_status,
                 legacy_clients=legacy_clients,
+                zoom_link=zoom_link,
             )
 
             update_tutor_summary_sheet(gc, sheet_ref)
 
-            st.success(
+            msg = (
                 f"Saved session for {student} on {date_iso}. "
                 f"Parent Pays: ${fin['amount_due']:.2f} • "
-                f"Tutor Pay: ${fin['tutor_pay']:.2f} • Notes: {fin['notes']}"
+                f"Tutor Pay: ${fin['tutor_pay']:.2f}"
             )
+            if zoom_link:
+                msg += f"\nZoom meeting created: {zoom_link}"
+
+            st.success(msg)
+
         except Exception as e:
             st.error(str(e))
 
