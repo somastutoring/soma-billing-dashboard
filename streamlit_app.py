@@ -24,6 +24,10 @@ from billing_logic import (
 )
 
 from zoom_integration import create_zoom_meeting  # separate file
+from email.message import EmailMessage
+import smtplib
+import uuid
+from datetime import datetime, timedelta
 
 
 # -------------- PASSWORD GATE --------------
@@ -443,3 +447,4 @@ with tab_zoom:
 
             except Exception as e:
                 st.error(f"Error creating Zoom meeting: {e}")
+
