@@ -24,6 +24,7 @@ COLUMNS = [
     "rate",
     "amount_due",
     "paid_status",
+    "zoom_link",   # NEW: store Zoom meeting URL
 ]
 
 SERVICES = ["K–12 Tutoring", "SAT & ACT Prep", "College & AP Courses"]
@@ -164,6 +165,7 @@ def append_session(
     tutor: str,
     paid_status: str,
     legacy_clients: List[str],
+    zoom_link: str = "",             # NEW: zoom link for this session
 ) -> Dict[str, Any]:
     """
     Core logic that:
@@ -245,6 +247,7 @@ def append_session(
             f"{hourly_rate:.2f}",
             f"{amount_due:.2f}",
             paid_status,
+            zoom_link,
         ]
     )
 
@@ -629,3 +632,89 @@ def search_sessions_by_student_month(ws, student_name: str, year_month: str) -> 
         if sname == target and date_str.startswith(ym):
             results.append(r)
     return results
+
+# ----------------- CLIENT EMAIL STORAGE (clients sheet) -----------------
+
+def get_or_create_clients_sheet(sh: gspread.Spreadsheet):
+    """
+    Ensure there is a 'clients' worksheet with columns:
+      student_name, email
+    """
+    try:
+        ws_clients = sh.worksheet("clients")
+    except gspread.WorksheetNotFound:
+        ws_clients = sh.add_worksheet(title="clients", rows=200, cols=2)
+        ws_clients.update("A1:B1", [["student_name", "email"]])
+    return ws_clients
+
+
+def save_student_email(sh: gspread.Spreadsheet, student_name: str, email: str):
+    """
+    Save or update a student's email in 'clients' sheet.
+    """
+    student_name = (student_name or "").strip()
+    email = (email or "").strip()
+    if not student_name or not email:
+        return
+
+    ws_clients = get_or_create_clients_sheet(sh)
+    all_vals = ws_clients.get_all_values()
+    if not all_vals:
+        ws_clients.update("A1:B1", [["student_name", "email"]])
+        all_vals = ws_clients.get_all_values()
+
+    header = all_vals[0]
+    try:
+        name_idx = header.index("student_name") + 1
+        email_idx = header.index("email") + 1
+    except ValueError:
+        ws_clients.clear()
+        ws_clients.update("A1:B1", [["student_name", "email"]])
+        name_idx, email_idx = 1, 2
+
+    for row_num in range(2, len(all_vals) + 1):
+        row = all_vals[row_num - 1]
+        if len(row) < name_idx:
+            continue
+        r_name = (row[name_idx - 1] or "").strip()
+        if r_name.lower() == student_name.lower():
+            ws_clients.update_cell(row_num, email_idx, email)
+            return
+
+    ws_clients.append_row([student_name, email])
+
+
+def get_student_email(sh: gspread.Spreadsheet, student_name: str) -> str:
+    """
+    Look up student's email from 'clients' sheet.
+    Returns "" if not found.
+    """
+    student_name = (student_name or "").strip()
+    if not student_name:
+        return ""
+
+    try:
+        ws_clients = sh.worksheet("clients")
+    except gspread.WorksheetNotFound:
+        return ""
+
+    all_vals = ws_clients.get_all_values()
+    if not all_vals:
+        return ""
+
+    header = all_vals[0]
+    try:
+        name_idx = header.index("student_name") + 1
+        email_idx = header.index("email") + 1
+    except ValueError:
+        return ""
+
+    for row_num in range(2, len(all_vals) + 1):
+        row = all_vals[row_num - 1]
+        if len(row) < max(name_idx, email_idx):
+            continue
+        r_name = (row[name_idx - 1] or "").strip()
+        if r_name.lower() == student_name.lower():
+            return (row[email_idx - 1] or "").strip()
+
+    return ""
