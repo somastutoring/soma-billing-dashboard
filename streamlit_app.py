@@ -385,7 +385,8 @@ with tab_zoom:
     else:
         # ---------- small helpers (only used inside this tab) ----------
 
-        def build_ics(summary, start_dt, duration_minutes, organizer_email, attendee_email):
+        def build_ics(summary, start_dt, duration_minutes, organizer_email,
+                      attendee_email=None, extra_attendee_email=None):
             """
             Build a basic ICS calendar invite as a string.
             start_dt is a naive datetime in your local time.
@@ -413,14 +414,23 @@ with tab_zoom:
                 f"ORGANIZER:MAILTO:{organizer_email}",
             ]
             if attendee_email:
-                lines.append(f"ATTENDEE;CN=Client;RSVP=TRUE:MAILTO:{attendee_email}")
+                lines.append(
+                    f"ATTENDEE;CN=Client;RSVP=TRUE:MAILTO:{attendee_email}"
+                )
+            if extra_attendee_email:
+                lines.append(
+                    f"ATTENDEE;CN=GroupCalendar;RSVP=FALSE:MAILTO:{extra_attendee_email}"
+                )
+
             lines.extend(["END:VEVENT", "END:VCALENDAR", ""])
             return "\r\n".join(lines)
 
-        def send_invite_email(email_cfg, to_email, subject, body_text, ics_content):
+        def send_invite_email(email_cfg, to_email, subject, body_text,
+                              ics_content, extra_recipients=None):
             """
             Send an email with an ICS attachment using Gmail SMTP.
             email_cfg comes from st.secrets['email'].
+            extra_recipients: list of extra email addresses (like your group calendar).
             """
             smtp_host = email_cfg["smtp_host"]
             smtp_port = int(email_cfg.get("smtp_port", 587))
@@ -428,16 +438,22 @@ with tab_zoom:
             smtp_password = email_cfg["smtp_password"]
 
             msg = EmailMessage()
+            recipients = [to_email] if to_email else []
+            if extra_recipients:
+                recipients.extend([r for r in extra_recipients if r])
+
+            if not recipients:
+                raise ValueError("No recipients to send email to.")
+
             msg["From"] = smtp_user
-            msg["To"] = to_email
+            msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
             msg.set_content(body_text)
 
             # ICS attachment as calendar invite
             msg.add_attachment(
                 ics_content,
-                maintype="text",
-                subtype="calendar",
+                subtype="calendar",        # <- FIX: no maintype arg
                 filename="invite.ics",
                 params={"method": "REQUEST"},
             )
@@ -450,16 +466,22 @@ with tab_zoom:
         # ---------- UI ----------
 
         records = ws.get_all_records()
-        existing_students = sorted({r["student_name"] for r in records if r.get("student_name")})
+        existing_students = sorted(
+            {r["student_name"] for r in records if r.get("student_name")}
+        )
 
         colz1, colz2 = st.columns(2)
 
         with colz1:
             student_opts = ["➕ New student…"] + existing_students
-            student_pick = st.selectbox("Student", student_opts, key="zoom_student_pick")
+            student_pick = st.selectbox(
+                "Student", student_opts, key="zoom_student_pick"
+            )
 
             if student_pick == "➕ New student…":
-                student = st.text_input("New student name (for Zoom)", key="zoom_new_student")
+                student = st.text_input(
+                    "New student name (for Zoom)", key="zoom_new_student"
+                )
             else:
                 student = student_pick
 
@@ -488,11 +510,11 @@ with tab_zoom:
 
         with colz2:
             duration_text = st.text_input(
-                "Duration (minutes)",
-                value="60",
-                key="zoom_minutes",
+                "Duration (minutes)", value="60", key="zoom_minutes"
             )
-            default_time = datetime.now().replace(minute=0, second=0, microsecond=0).time()
+            default_time = datetime.now().replace(
+                minute=0, second=0, microsecond=0
+            ).time()
             start_time = st.time_input(
                 "Meeting Start Time",
                 value=default_time,
@@ -512,7 +534,9 @@ with tab_zoom:
 
                 # Save / update client email if provided
                 if email.strip():
-                    save_student_email(sh, student.strip(), email.strip())
+                    save_student_email(
+                        sh, student.strip(), email.strip()
+                    )
 
                 # Parse date & duration
                 date_iso = parse_date(date_str)
@@ -541,13 +565,16 @@ with tab_zoom:
 
                 # Try to send email + calendar invite
                 email_cfg = dict(st.secrets.get("email", {}))
-                if email and email_cfg.get("smtp_user"):
+                group_cal_email = email_cfg.get("group_calendar")
+
+                if email_cfg.get("smtp_user"):
                     ics = build_ics(
                         summary=topic,
                         start_dt=start_dt,
                         duration_minutes=duration_minutes,
                         organizer_email=email_cfg["smtp_user"],
-                        attendee_email=email,
+                        attendee_email=email or None,
+                        extra_attendee_email=group_cal_email,
                     )
 
                     body = (
@@ -560,20 +587,30 @@ with tab_zoom:
                     try:
                         send_invite_email(
                             email_cfg=email_cfg,
-                            to_email=email,
+                            to_email=email or group_cal_email,
                             subject=topic,
                             body_text=body,
                             ics_content=ics,
+                            extra_recipients=(
+                                [group_cal_email]
+                                if email and group_cal_email
+                                else None
+                            ),
                         )
-                        st.info("📧 Email invite with calendar event sent to the client.")
+                        st.info(
+                            "📧 Email invite with calendar event sent "
+                            "to the client and group calendar."
+                        )
                     except Exception as e:
                         st.warning(f"Zoom created, but email failed: {e}")
                 else:
                     st.warning(
-                        "Zoom meeting created, but email config or client email is missing, "
+                        "Zoom meeting created, but email SMTP config is missing, "
                         "so no invite was sent."
                     )
 
             except Exception as e:
                 st.error(f"Error creating Zoom meeting: {e}")
+
+
 
