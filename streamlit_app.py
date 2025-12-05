@@ -25,7 +25,8 @@ from billing_logic import (
 
 from zoom_integration import create_zoom_meeting  # separate file
 
-# ---------------- PASSWORD GATE ----------------
+
+# -------------- PASSWORD GATE --------------
 
 def check_password():
     correct_pw = st.secrets.get("admin_password", "")
@@ -53,12 +54,11 @@ def check_password():
 if not check_password():
     st.stop()
 
-# ---------------- APP CONFIG ----------------
 
-st.set_page_config(page_title="Soma's Tutoring Billing", layout="centered")
+# -------------- APP CONFIG --------------
+
+st.set_page_config(page_title="Soma's Tutoring – Billing", layout="centered")
 st.title("Soma's Tutoring – Billing Dashboard")
-
-# ---------------- HIDDEN AUTO GOOGLE CONNECTION ----------------
 
 sheet_ref = st.secrets.get("sheet_ref", "").strip()
 
@@ -87,7 +87,7 @@ else:
     st.error("❌ Missing Google credentials or sheet_ref in secrets.")
     st.stop()
 
-# Zoom config (can be empty if you haven't wired Zoom yet)
+# Zoom config (may be empty if you haven't set it up yet)
 zoom_cfg = dict(st.secrets.get("zoom", {}))
 
 
@@ -104,18 +104,26 @@ def get_default_sunday_str():
     default_sunday = today + timedelta(days=days_until_sun)
     return default_sunday.isoformat()
 
-# ---------------- TABS ----------------
 
-tab_log, tab_client, tab_weekly, tab_month = st.tabs(
-    ["➕ Log Session", "💳 Client Payments", "📅 Weekly Tutor Payouts", "📊 Monthly Summary"]
+# -------------- TABS --------------
+
+tab_log, tab_client, tab_weekly, tab_month, tab_zoom = st.tabs(
+    [
+        "➕ Log Session",
+        "💳 Client Payments",
+        "📅 Weekly Tutor Payouts",
+        "📊 Monthly Summary",
+        "📆 Schedule Zoom Meeting",
+    ]
 )
 
-# ---------------- TAB 1: LOG SESSION ----------------
+# -------------- TAB 1: LOG SESSION (NO ZOOM, JUST LIKE BEFORE) --------------
 
 with tab_log:
     st.subheader("Log a New Session")
     require_ws()
 
+    # pull existing students/tutors for dropdowns
     records = ws.get_all_records()
     existing_students = sorted({r["student_name"] for r in records if r.get("student_name")})
     existing_tutors = sorted({r["tutor"] for r in records if r.get("tutor")})
@@ -123,27 +131,23 @@ with tab_log:
     col1, col2 = st.columns(2)
 
     with col1:
+        # student selector, with option for new student
         student_opts = ["➕ New student…"] + existing_students
         student_pick = st.selectbox("Student Name", student_opts)
 
-        student = (
-            st.text_input("New student name", "")
-            if student_pick == "➕ New student…"
-            else student_pick
-        )
-
-        # Email input for new students only
-        new_student_email = ""
         if student_pick == "➕ New student…":
-            new_student_email = st.text_input("New student email (for Zoom invites)", "")
+            student = st.text_input("New student name", "")
+            new_student_email = st.text_input("New student email (for future Zoom invites)", "")
+        else:
+            student = student_pick
+            new_student_email = ""
 
         date_str = st.text_input("Date", value=datetime.today().date().isoformat())
         service = st.selectbox("Service", SERVICES)
 
     with col2:
         minutes_text = st.text_input("Minutes", "")
-        hhmm_text = st.text_input("HH:MM", "")
-        session_time = st.time_input("Session Start Time", value=time(18, 0))
+        hhmm_text = st.text_input("HH:MM (leave Minutes empty if using this)", "")
         mode = st.selectbox("Mode", MODES)
 
     col3, col4 = st.columns(2)
@@ -151,20 +155,16 @@ with tab_log:
     with col3:
         if "Nitin" not in existing_tutors:
             existing_tutors.append("Nitin")
-
         tutor_opts = ["➕ New tutor…"] + sorted(existing_tutors)
         tutor_pick = st.selectbox("Tutor", tutor_opts)
 
-        tutor = (
-            st.text_input("New tutor name", "")
-            if tutor_pick == "➕ New tutor…"
-            else tutor_pick
-        )
+        if tutor_pick == "➕ New tutor…":
+            tutor = st.text_input("New tutor name", "")
+        else:
+            tutor = tutor_pick
 
     with col4:
         paid_status = st.selectbox("Paid Status", PAID_OPTIONS)
-
-    create_zoom = st.checkbox("Create Zoom meeting for this session?", value=False)
 
     if st.button("Submit Session", type="primary"):
         try:
@@ -178,39 +178,9 @@ with tab_log:
             date_iso = parse_date(date_str)
             minutes_val = parse_duration(minutes_text, hhmm_text)
 
-            # 1) Save / update email for new student
-            if student_pick == "➕ New student…":
-                if new_student_email.strip():
-                    save_student_email(sh, student.strip(), new_student_email.strip())
-
-            # 2) Look up email for existing student
-            student_email = get_student_email(sh, student.strip())
-
-            # 3) Optionally create Zoom meeting
-            zoom_link = ""
-            if create_zoom:
-                if not zoom_cfg:
-                    st.error("Zoom config missing in secrets; cannot create meeting.")
-                    st.stop()
-
-                if not student_email:
-                    st.warning(
-                        "No email found for this student in 'clients' sheet. "
-                        "Meeting will be created but no automatic invite is sent."
-                    )
-
-                # Combine date + time (no timezone; Zoom uses account timezone)
-                session_date = datetime.strptime(date_iso, "%Y-%m-%d").date()
-                dt = datetime.combine(session_date, session_time)
-                start_time_iso = dt.isoformat()
-
-                topic = f"{student} – {service}"
-                zoom_link = create_zoom_meeting(
-                    zoom_cfg=zoom_cfg,
-                    topic=topic,
-                    start_time_iso=start_time_iso,
-                    duration_minutes=minutes_val,
-                )
+            # if new student and email provided, save email to 'clients' sheet
+            if student_pick == "➕ New student…" and new_student_email.strip():
+                save_student_email(sh, student.strip(), new_student_email.strip())
 
             fin = append_session(
                 ws=ws,
@@ -222,20 +192,16 @@ with tab_log:
                 tutor=tutor.strip(),
                 paid_status=paid_status,
                 legacy_clients=legacy_clients,
-                zoom_link=zoom_link,
+                zoom_link="",  # NO ZOOM from this tab
             )
 
             update_tutor_summary_sheet(gc, sheet_ref)
 
-            msg = (
+            st.success(
                 f"Saved session for {student} on {date_iso}. "
                 f"Parent Pays: ${fin['amount_due']:.2f} • "
                 f"Tutor Pay: ${fin['tutor_pay']:.2f}"
             )
-            if zoom_link:
-                msg += f"\nZoom meeting created: {zoom_link}"
-
-            st.success(msg)
 
         except Exception as e:
             st.error(str(e))
@@ -252,7 +218,8 @@ with tab_log:
     except Exception as e:
         st.error(f"Error loading recent sessions: {e}")
 
-# ---------------- TAB 2: CLIENT PAYMENTS (SEARCH + UNPAID CLICK-TO-PAID) ----------------
+
+# -------------- TAB 2: CLIENT PAYMENTS --------------
 
 with tab_client:
     st.subheader("Client Payments")
@@ -263,7 +230,6 @@ with tab_client:
 
     # ---- Search sessions by student + month ----
     st.markdown("### Search Sessions by Student & Month")
-
     cols_search = st.columns(2)
     with cols_search[0]:
         student_search = st.selectbox(
@@ -334,7 +300,8 @@ with tab_client:
         else:
             st.info("Unpaid sessions have no IDs; cannot mark by click. Check sheet IDs.")
 
-# ---------------- TAB 3: WEEKLY PAYROLL ----------------
+
+# -------------- TAB 3: WEEKLY PAYROLL --------------
 
 with tab_weekly:
     st.subheader("Weekly Tutor Payroll (Sunday Pay)")
@@ -375,7 +342,8 @@ with tab_weekly:
             except Exception as e:
                 st.error(str(e))
 
-# ---------------- TAB 4: MONTHLY SUMMARY ----------------
+
+# -------------- TAB 4: MONTHLY SUMMARY --------------
 
 with tab_month:
     st.subheader("Monthly Summary")
@@ -396,3 +364,82 @@ with tab_month:
             st.info("Summary sheet is empty.")
     except Exception:
         st.info("No summary sheet yet. Click 'Rebuild Summary' to create it.")
+
+
+# -------------- TAB 5: SCHEDULE ZOOM MEETING (SEPARATE FROM LOG SESSION) --------------
+
+with tab_zoom:
+    st.subheader("Schedule Zoom Meeting")
+    require_ws()
+
+    if not zoom_cfg or not zoom_cfg.get("account_id") or not zoom_cfg.get("client_id") or not zoom_cfg.get("client_secret"):
+        st.warning(
+            "Zoom API credentials are not fully set in secrets. "
+            "Fill in [zoom] in your secrets.toml to enable this tab."
+        )
+    else:
+        # use existing students for dropdown
+        records = ws.get_all_records()
+        existing_students = sorted({r["student_name"] for r in records if r.get("student_name")})
+
+        colz1, colz2 = st.columns(2)
+
+        with colz1:
+            student_opts = ["➕ New student…"] + existing_students
+            student_pick = st.selectbox("Student", student_opts, key="zoom_student_pick")
+
+            if student_pick == "➕ New student…":
+                student = st.text_input("New student name (for Zoom)", key="zoom_new_student")
+            else:
+                student = student_pick
+
+            # email – for existing student, prefill from clients sheet
+            existing_email = get_student_email(sh, student) if student_pick != "➕ New student…" else ""
+            email = st.text_input("Student email (for Zoom invite)", value=existing_email, key="zoom_email")
+
+            date_str = st.text_input("Meeting Date (YYYY-MM-DD)", value=datetime.today().date().isoformat(), key="zoom_date")
+            service = st.selectbox("Service (for meeting title only)", SERVICES, key="zoom_service")
+
+        with colz2:
+            minutes_text = st.text_input("Duration Minutes", "60", key="zoom_minutes")
+            mt = time(18, 0)
+            start_time = st.time_input("Meeting Start Time", value=mt, key="zoom_time")
+            mode = st.selectbox("Mode (just for info)", MODES, key="zoom_mode")
+
+        if st.button("Create Zoom Meeting", type="primary"):
+            try:
+                if not student.strip():
+                    st.error("Student name is required.")
+                    st.stop()
+                if not email.strip():
+                    st.warning("No email provided; meeting will be created but no invitee is associated.")
+                else:
+                    # store/update email in clients sheet
+                    save_student_email(sh, student.strip(), email.strip())
+
+                # parse date + minutes
+                date_iso = parse_date(date_str)
+                minutes_val = int(minutes_text)
+
+                # combine date + time into ISO string (Zoom uses account timezone)
+                meeting_date = datetime.strptime(date_iso, "%Y-%m-%d").date()
+                dt = datetime.combine(meeting_date, start_time)
+                start_time_iso = dt.isoformat()
+
+                topic = f"{student} – {service}"
+
+                zoom_link = create_zoom_meeting(
+                    zoom_cfg=zoom_cfg,
+                    topic=topic,
+                    start_time_iso=start_time_iso,
+                    duration_minutes=minutes_val,
+                )
+
+                st.success("Zoom meeting created successfully!")
+                st.write("**Meeting topic:**", topic)
+                st.write("**Start time:**", start_time_iso)
+                st.write("**Duration:**", f"{minutes_val} minutes")
+                st.markdown(f"**Join link:** [{zoom_link}]({zoom_link})")
+
+            except Exception as e:
+                st.error(f"Error creating Zoom meeting: {e}")
