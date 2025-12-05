@@ -376,13 +376,79 @@ with tab_zoom:
     st.subheader("Schedule Zoom Meeting")
     require_ws()
 
+    # Need Zoom credentials in secrets
     if not zoom_cfg or not zoom_cfg.get("account_id") or not zoom_cfg.get("client_id") or not zoom_cfg.get("client_secret"):
         st.warning(
             "Zoom API credentials are not fully set in secrets. "
             "Fill in [zoom] in your secrets.toml to enable this tab."
         )
     else:
-        # use existing students for dropdown
+        # ---------- small helpers (only used inside this tab) ----------
+
+        def build_ics(summary, start_dt, duration_minutes, organizer_email, attendee_email):
+            """
+            Build a basic ICS calendar invite as a string.
+            start_dt is a naive datetime in your local time.
+            """
+            dt_end = start_dt + timedelta(minutes=duration_minutes)
+            uid = uuid.uuid4().hex
+            dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+            def fmt(dt):
+                # "floating" time; Google will apply your calendar time zone
+                return dt.strftime("%Y%m%dT%H%M00")
+
+            lines = [
+                "BEGIN:VCALENDAR",
+                "PRODID:-//Soma Tutoring//EN",
+                "VERSION:2.0",
+                "CALSCALE:GREGORIAN",
+                "METHOD:REQUEST",
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTAMP:{dtstamp}",
+                f"DTSTART:{fmt(start_dt)}",
+                f"DTEND:{fmt(dt_end)}",
+                f"SUMMARY:{summary}",
+                f"ORGANIZER:MAILTO:{organizer_email}",
+            ]
+            if attendee_email:
+                lines.append(f"ATTENDEE;CN=Client;RSVP=TRUE:MAILTO:{attendee_email}")
+            lines.extend(["END:VEVENT", "END:VCALENDAR", ""])
+            return "\r\n".join(lines)
+
+        def send_invite_email(email_cfg, to_email, subject, body_text, ics_content):
+            """
+            Send an email with an ICS attachment using Gmail SMTP.
+            email_cfg comes from st.secrets['email'].
+            """
+            smtp_host = email_cfg["smtp_host"]
+            smtp_port = int(email_cfg.get("smtp_port", 587))
+            smtp_user = email_cfg["smtp_user"]
+            smtp_password = email_cfg["smtp_password"]
+
+            msg = EmailMessage()
+            msg["From"] = smtp_user
+            msg["To"] = to_email
+            msg["Subject"] = subject
+            msg.set_content(body_text)
+
+            # ICS attachment as calendar invite
+            msg.add_attachment(
+                ics_content,
+                maintype="text",
+                subtype="calendar",
+                filename="invite.ics",
+                params={"method": "REQUEST"},
+            )
+
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+
+        # ---------- UI ----------
+
         records = ws.get_all_records()
         existing_students = sorted({r["student_name"] for r in records if r.get("student_name")})
 
@@ -397,53 +463,116 @@ with tab_zoom:
             else:
                 student = student_pick
 
-            # email – for existing student, prefill from clients sheet
-            existing_email = get_student_email(sh, student) if student_pick != "➕ New student…" else ""
-            email = st.text_input("Student email (for Zoom invite)", value=existing_email, key="zoom_email")
+            # Prefill email for existing students from the clients sheet
+            existing_email = ""
+            if student and student_pick != "➕ New student…":
+                existing_email = get_student_email(sh, student) or ""
 
-            date_str = st.text_input("Meeting Date (YYYY-MM-DD)", value=datetime.today().date().isoformat(), key="zoom_date")
-            service = st.selectbox("Service (for meeting title only)", SERVICES, key="zoom_service")
+            email = st.text_input(
+                "Student email (for Zoom invite)",
+                value=existing_email,
+                key="zoom_email",
+            )
+
+            date_str = st.text_input(
+                "Meeting Date (YYYY-MM-DD)",
+                value=datetime.today().date().isoformat(),
+                key="zoom_date",
+            )
+
+            service_for_title = st.selectbox(
+                "Service (for meeting title only)",
+                SERVICES,
+                key="zoom_service",
+            )
 
         with colz2:
-            minutes_text = st.text_input("Duration Minutes", "60", key="zoom_minutes")
-            mt = time(18, 0)
-            start_time = st.time_input("Meeting Start Time", value=mt, key="zoom_time")
-            mode = st.selectbox("Mode (just for info)", MODES, key="zoom_mode")
+            duration_text = st.text_input(
+                "Duration (minutes)",
+                value="60",
+                key="zoom_minutes",
+            )
+            default_time = datetime.now().replace(minute=0, second=0, microsecond=0).time()
+            start_time = st.time_input(
+                "Meeting Start Time",
+                value=default_time,
+                key="zoom_time",
+            )
+            mode_for_info = st.selectbox(
+                "Mode (just for info)",
+                MODES,
+                key="zoom_mode",
+            )
 
         if st.button("Create Zoom Meeting", type="primary"):
             try:
                 if not student.strip():
                     st.error("Student name is required.")
                     st.stop()
-                if not email.strip():
-                    st.warning("No email provided; meeting will be created but no invitee is associated.")
-                else:
-                    # store/update email in clients sheet
+
+                # Save / update client email if provided
+                if email.strip():
                     save_student_email(sh, student.strip(), email.strip())
 
-                # parse date + minutes
+                # Parse date & duration
                 date_iso = parse_date(date_str)
-                minutes_val = int(minutes_text)
+                duration_minutes = int(duration_text)
 
-                # combine date + time into ISO string (Zoom uses account timezone)
+                # Combine to local datetime
                 meeting_date = datetime.strptime(date_iso, "%Y-%m-%d").date()
-                dt = datetime.combine(meeting_date, start_time)
-                start_time_iso = dt.isoformat()
+                start_dt = datetime.combine(meeting_date, start_time)
 
-                topic = f"{student} – {service}"
+                topic = f"{student} – {service_for_title}"
 
+                # Create Zoom meeting
+                start_time_iso = start_dt.isoformat()
                 zoom_link = create_zoom_meeting(
                     zoom_cfg=zoom_cfg,
                     topic=topic,
                     start_time_iso=start_time_iso,
-                    duration_minutes=minutes_val,
+                    duration_minutes=duration_minutes,
                 )
 
-                st.success("Zoom meeting created successfully!")
-                st.write("**Meeting topic:**", topic)
-                st.write("**Start time:**", start_time_iso)
-                st.write("**Duration:**", f"{minutes_val} minutes")
+                st.success("✅ Zoom meeting created successfully!")
+                st.write("**Topic:**", topic)
+                st.write("**Start:**", start_time_iso)
+                st.write("**Duration:**", f"{duration_minutes} minutes")
                 st.markdown(f"**Join link:** [{zoom_link}]({zoom_link})")
+
+                # Try to send email + calendar invite
+                email_cfg = dict(st.secrets.get("email", {}))
+                if email and email_cfg.get("smtp_user"):
+                    ics = build_ics(
+                        summary=topic,
+                        start_dt=start_dt,
+                        duration_minutes=duration_minutes,
+                        organizer_email=email_cfg["smtp_user"],
+                        attendee_email=email,
+                    )
+
+                    body = (
+                        f"Hi,\n\n"
+                        f"Here is your Zoom session for {topic}.\n\n"
+                        f"Join link: {zoom_link}\n\n"
+                        f"Best,\nSoma's Tutoring"
+                    )
+
+                    try:
+                        send_invite_email(
+                            email_cfg=email_cfg,
+                            to_email=email,
+                            subject=topic,
+                            body_text=body,
+                            ics_content=ics,
+                        )
+                        st.info("📧 Email invite with calendar event sent to the client.")
+                    except Exception as e:
+                        st.warning(f"Zoom created, but email failed: {e}")
+                else:
+                    st.warning(
+                        "Zoom meeting created, but email config or client email is missing, "
+                        "so no invite was sent."
+                    )
 
             except Exception as e:
                 st.error(f"Error creating Zoom meeting: {e}")
