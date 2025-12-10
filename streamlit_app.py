@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, time
 import streamlit as st
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 from billing_logic import (
     create_gc_from_info,
@@ -28,8 +30,7 @@ from email.message import EmailMessage
 import smtplib
 import uuid
 from datetime import datetime, timedelta
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
+
 
 
 # -------------- PASSWORD GATE --------------
@@ -692,3 +693,4 @@ with tab_zoom:
 
             except Exception as e:
                 st.error(f"Error creating Zoom meeting: {e}")
+
