@@ -28,6 +28,8 @@ from email.message import EmailMessage
 import smtplib
 import uuid
 from datetime import datetime, timedelta
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 
 # -------------- PASSWORD GATE --------------
@@ -377,7 +379,12 @@ with tab_zoom:
     require_ws()
 
     # Need Zoom credentials in secrets
-    if not zoom_cfg or not zoom_cfg.get("account_id") or not zoom_cfg.get("client_id") or not zoom_cfg.get("client_secret"):
+    if (
+        not zoom_cfg
+        or not zoom_cfg.get("account_id")
+        or not zoom_cfg.get("client_id")
+        or not zoom_cfg.get("client_secret")
+    ):
         st.warning(
             "Zoom API credentials are not fully set in secrets. "
             "Fill in [zoom] in your secrets.toml to enable this tab."
@@ -385,8 +392,13 @@ with tab_zoom:
     else:
         # ---------- small helpers (only used inside this tab) ----------
 
-        def build_ics(summary, start_dt, duration_minutes, organizer_email,
-                      attendee_email=None, extra_attendee_email=None):
+        def build_ics(
+            summary,
+            start_dt,
+            duration_minutes,
+            organizer_email,
+            attendee_email=None,
+        ):
             """
             Build a basic ICS calendar invite as a string.
             start_dt is a naive datetime in your local time.
@@ -417,20 +429,16 @@ with tab_zoom:
                 lines.append(
                     f"ATTENDEE;CN=Client;RSVP=TRUE:MAILTO:{attendee_email}"
                 )
-            if extra_attendee_email:
-                lines.append(
-                    f"ATTENDEE;CN=GroupCalendar;RSVP=FALSE:MAILTO:{extra_attendee_email}"
-                )
 
             lines.extend(["END:VEVENT", "END:VCALENDAR", ""])
             return "\r\n".join(lines)
 
-        def send_invite_email(email_cfg, to_email, subject, body_text,
-                              ics_content, extra_recipients=None):
+        def send_invite_email(
+            email_cfg, to_email, subject, body_text, ics_content
+        ):
             """
             Send an email with an ICS attachment using Gmail SMTP.
             email_cfg comes from st.secrets['email'].
-            extra_recipients: list of extra email addresses (like your group calendar).
             """
             smtp_host = email_cfg["smtp_host"]
             smtp_port = int(email_cfg.get("smtp_port", 587))
@@ -439,8 +447,6 @@ with tab_zoom:
 
             msg = EmailMessage()
             recipients = [to_email] if to_email else []
-            if extra_recipients:
-                recipients.extend([r for r in extra_recipients if r])
 
             if not recipients:
                 raise ValueError("No recipients to send email to.")
@@ -453,7 +459,7 @@ with tab_zoom:
             # ICS attachment as calendar invite
             msg.add_attachment(
                 ics_content,
-                subtype="calendar",        # <- FIX: no maintype arg
+                subtype="calendar",  # no maintype arg
                 filename="invite.ics",
                 params={"method": "REQUEST"},
             )
@@ -462,6 +468,65 @@ with tab_zoom:
                 server.starttls()
                 server.login(smtp_user, smtp_password)
                 server.send_message(msg)
+
+        def create_group_calendar_event(
+            summary,
+            start_dt,
+            duration_minutes,
+            zoom_link,
+            attendee_email=None,
+        ):
+            """
+            Create an event directly on the SHARED tutoring calendar
+            using the service account (no OAuth popup).
+            """
+            group_cfg = st.secrets.get("group_calendar", {})
+            cal_id = group_cfg.get("id")
+            if not cal_id:
+                # no group calendar configured, silently skip
+                return None
+
+            tz = group_cfg.get("time_zone", "America/New_York")
+
+            # Build service-account creds with calendar scope
+            sa_info = st.secrets["gcp_service_account"]
+            scopes = [
+                "https://www.googleapis.com/auth/calendar",
+            ]
+            creds = Credentials.from_service_account_info(
+                sa_info, scopes=scopes
+            )
+
+            service = build("calendar", "v3", credentials=creds)
+
+            end_dt = start_dt + timedelta(minutes=duration_minutes)
+
+            event = {
+                "summary": summary,
+                "description": f"Zoom link: {zoom_link}",
+                "start": {
+                    "dateTime": start_dt.isoformat(),
+                    "timeZone": tz,
+                },
+                "end": {
+                    "dateTime": end_dt.isoformat(),
+                    "timeZone": tz,
+                },
+            }
+
+            if attendee_email:
+                event["attendees"] = [{"email": attendee_email}]
+
+            created = (
+                service.events()
+                .insert(
+                    calendarId=cal_id,  # 👈 THIS forces the correct calendar
+                    body=event,
+                    sendUpdates="all",
+                )
+                .execute()
+            )
+            return created.get("htmlLink")
 
         # ---------- UI ----------
 
@@ -563,18 +628,40 @@ with tab_zoom:
                 st.write("**Duration:**", f"{duration_minutes} minutes")
                 st.markdown(f"**Join link:** [{zoom_link}]({zoom_link})")
 
-                # Try to send email + calendar invite
-                email_cfg = dict(st.secrets.get("email", {}))
-                group_cal_email = email_cfg.get("group_calendar")
+                # Create event on GROUP calendar via API
+                try:
+                    cal_link = create_group_calendar_event(
+                        summary=topic,
+                        start_dt=start_dt,
+                        duration_minutes=duration_minutes,
+                        zoom_link=zoom_link,
+                        attendee_email=email or None,
+                    )
+                    if cal_link:
+                        st.info(
+                            f"📅 Event added to shared tutoring calendar. "
+                            f"[Open in Calendar]({cal_link})"
+                        )
+                    else:
+                        st.warning(
+                            "Calendar ID not configured; event was not "
+                            "added to the shared calendar."
+                        )
+                except Exception as e:
+                    st.warning(
+                        f"Zoom created, but calendar event failed: {e}"
+                    )
 
-                if email_cfg.get("smtp_user"):
+                # Try to send email + ICS to client
+                email_cfg = dict(st.secrets.get("email", {}))
+
+                if email_cfg.get("smtp_user") and email:
                     ics = build_ics(
                         summary=topic,
                         start_dt=start_dt,
                         duration_minutes=duration_minutes,
                         organizer_email=email_cfg["smtp_user"],
-                        attendee_email=email or None,
-                        extra_attendee_email=group_cal_email,
+                        attendee_email=email,
                     )
 
                     body = (
@@ -587,30 +674,21 @@ with tab_zoom:
                     try:
                         send_invite_email(
                             email_cfg=email_cfg,
-                            to_email=email or group_cal_email,
+                            to_email=email,
                             subject=topic,
                             body_text=body,
                             ics_content=ics,
-                            extra_recipients=(
-                                [group_cal_email]
-                                if email and group_cal_email
-                                else None
-                            ),
                         )
-                        st.info(
-                            "📧 Email invite with calendar event sent "
-                            "to the client and group calendar."
-                        )
+                        st.info("📧 Email invite sent to the client.")
                     except Exception as e:
-                        st.warning(f"Zoom created, but email failed: {e}")
+                        st.warning(
+                            f"Zoom created, but email failed: {e}"
+                        )
                 else:
                     st.warning(
-                        "Zoom meeting created, but email SMTP config is missing, "
-                        "so no invite was sent."
+                        "Zoom meeting created, but email SMTP config is "
+                        "missing or no client email, so no invite was sent."
                     )
 
             except Exception as e:
                 st.error(f"Error creating Zoom meeting: {e}")
-
-
-
