@@ -655,14 +655,17 @@ with tab_zoom:
 
                 # Try to send email + ICS to client
                 email_cfg = dict(st.secrets.get("email", {}))
+                group_cal_email = email_cfg.get("group_calendar")
 
-                if email_cfg.get("smtp_user") and email:
+                # ---------- 1) Email + ICS ----------
+                if email_cfg.get("smtp_user"):
                     ics = build_ics(
                         summary=topic,
                         start_dt=start_dt,
                         duration_minutes=duration_minutes,
                         organizer_email=email_cfg["smtp_user"],
-                        attendee_email=email,
+                        attendee_email=email or None,
+                        extra_attendee_email=group_cal_email,
                     )
 
                     body = (
@@ -675,22 +678,58 @@ with tab_zoom:
                     try:
                         send_invite_email(
                             email_cfg=email_cfg,
-                            to_email=email,
+                            to_email=email or group_cal_email,
                             subject=topic,
                             body_text=body,
                             ics_content=ics,
+                            extra_recipients=(
+                                [group_cal_email]
+                                if email and group_cal_email
+                                else None
+                            ),
                         )
-                        st.info("📧 Email invite sent to the client.")
+                        st.info(
+                            "📧 Email invite with calendar event sent "
+                            "to the client and group calendar (via email invite)."
+                        )
                     except Exception as e:
-                        st.warning(
-                            f"Zoom created, but email failed: {e}"
-                        )
+                        st.warning(f"Zoom created, but email failed: {e}")
                 else:
                     st.warning(
-                        "Zoom meeting created, but email SMTP config is "
-                        "missing or no client email, so no invite was sent."
+                        "Zoom meeting created, but email SMTP config is missing, "
+                        "so no invite was sent."
                     )
 
-            except Exception as e:
-                st.error(f"Error creating Zoom meeting: {e}")
+                # ---------- 2) Direct Google Calendar event (optional) ----------
+                # Try to read calendar_id from [calendar] section,
+                # fall back to the group_calendar email if needed.
+                calendar_id = None
+                cal_cfg = st.secrets.get("calendar")
+                if isinstance(cal_cfg, dict):
+                    calendar_id = cal_cfg.get("calendar_id")
 
+                if not calendar_id:
+                    # As a fallback, some setups use the group calendar
+                    # email as the calendar ID.
+                    calendar_id = group_cal_email
+
+                if calendar_id:
+                    try:
+                        add_event_to_calendar(
+                            calendar_id=calendar_id,
+                            summary=topic,
+                            start_dt=start_dt,
+                            duration_minutes=duration_minutes,
+                            zoom_link=zoom_link,
+                        )
+                        st.success(
+                            "📅 Event also added directly to the shared calendar."
+                        )
+                    except Exception as e:
+                        st.warning(
+                            f"Zoom created, but Google Calendar event failed: {e}"
+                        )
+                else:
+                    st.info(
+                        "Calendar ID not configured; event was not added to the shared calendar."
+                    )
