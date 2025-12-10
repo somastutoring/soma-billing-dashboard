@@ -31,14 +31,13 @@ NEW_RATES = {
     "College & AP Courses": {"Online": 40.0, "In-Person": 50.0},
 }
 
-
-# -----------------------------------------------------------------------------
-# GOOGLE SERVICE HELPERS
-# -----------------------------------------------------------------------------
-
 SCOPES_SHEETS = ["https://www.googleapis.com/auth/spreadsheets"]
 SCOPES_CAL = ["https://www.googleapis.com/auth/calendar"]
 
+
+# -----------------------------------------------------------------------------
+# GOOGLE CLIENTS
+# -----------------------------------------------------------------------------
 
 @st.cache_resource
 def get_gspread_client():
@@ -57,7 +56,7 @@ def get_calendar_service():
 @st.cache_resource
 def get_workbook_and_sessions():
     gc = get_gspread_client()
-    sheet_ref = st.secrets["sheets"]["sheet_ref"]
+    sheet_ref = st.secrets["sheet_ref"]
     if sheet_ref.startswith("http"):
         sh = gc.open_by_url(sheet_ref)
     else:
@@ -124,18 +123,16 @@ def get_student_email(sh, student_name):
 def save_student_email(sh, student_name, email):
     ws_email = get_student_email_sheet(sh)
     records = ws_email.get_all_records()
-    # find existing row
     for idx, r in enumerate(records, start=2):
         if (r.get("student_name") or "").strip().lower() == student_name.strip().lower():
             ws_email.update_acell(f"A{idx}", student_name)
             ws_email.update_acell(f"B{idx}", email)
             return
-    # else append
     ws_email.append_row([student_name, email])
 
 
 # -----------------------------------------------------------------------------
-# GENERAL BILLING HELPERS
+# BILLING HELPERS
 # -----------------------------------------------------------------------------
 
 def parse_date(s: str) -> str:
@@ -182,9 +179,14 @@ def hours_from_minutes(total_minutes: int) -> float:
 
 
 def get_legacy_clients():
-    biz_cfg = st.secrets.get("business", {})
-    raw = biz_cfg.get("legacy_clients", "Brie,Rafi,Caylee,Rishi")
-    return [s.strip() for s in raw.split(",") if s.strip()]
+    # matches your secrets: legacy_clients = ["Brie", "Rafi", "Caylee", "Rishi"]
+    if "legacy_clients" in st.secrets:
+        val = st.secrets["legacy_clients"]
+        if isinstance(val, (list, tuple)):
+            return [str(x) for x in val]
+        if isinstance(val, str):
+            return [s.strip() for s in val.split(",") if s.strip()]
+    return ["Brie", "Rafi", "Caylee", "Rishi"]
 
 
 def get_rate_for_student(student_name, service_name, mode_name):
@@ -196,8 +198,8 @@ def get_rate_for_student(student_name, service_name, mode_name):
 
 def compute_unpaid_df(records):
     df = pd.DataFrame(records)
-    if df.empty:
-        return df
+    if df.empty or "paid_status" not in df.columns:
+        return pd.DataFrame()
     return df[df["paid_status"].str.lower() == "not paid"]
 
 
@@ -211,20 +213,18 @@ def get_next_sunday(from_date=None):
 
 
 # -----------------------------------------------------------------------------
-# ZOOM + EMAIL + CALENDAR HELPERS
+# ZOOM / EMAIL / CALENDAR HELPERS
 # -----------------------------------------------------------------------------
 
 def create_zoom_meeting(zoom_cfg, topic, start_time_iso, duration_minutes):
-    """
-    Create a Zoom meeting using OAuth app credentials stored in secrets:
-    [zoom] account_id, client_id, client_secret
-    """
     account_id = zoom_cfg["account_id"]
     client_id = zoom_cfg["client_id"]
     client_secret = zoom_cfg["client_secret"]
 
-    # Get access token with Server-to-Server OAuth
-    token_url = f"https://zoom.us/oauth/token?grant_type=account_credentials&account_id={account_id}"
+    token_url = (
+        f"https://zoom.us/oauth/token?grant_type=account_credentials"
+        f"&account_id={account_id}"
+    )
     resp = requests.post(token_url, auth=(client_id, client_secret))
     resp.raise_for_status()
     access_token = resp.json()["access_token"]
@@ -337,7 +337,7 @@ def add_event_to_calendar(calendar_id, summary, start_dt, duration_minutes, zoom
 
 
 # -----------------------------------------------------------------------------
-# STREAMLIT APP UI
+# STREAMLIT APP
 # -----------------------------------------------------------------------------
 
 st.set_page_config(
@@ -351,7 +351,13 @@ st.title("Soma's Tutoring – Billing Dashboard")
 sh, ws = require_ws()
 
 tab_log, tab_payments, tab_payouts, tab_monthly, tab_zoom = st.tabs(
-    ["➕ Log Session", "💳 Client Payments", "📅 Weekly Tutor Payouts", "📊 Monthly Summary", "📹 Schedule Zoom Meeting"]
+    [
+        "➕ Log Session",
+        "💳 Client Payments",
+        "📅 Weekly Tutor Payouts",
+        "📊 Monthly Summary",
+        "📹 Schedule Zoom Meeting",
+    ]
 )
 
 # -----------------------------------------------------------------------------
@@ -387,7 +393,11 @@ with tab_log:
         )
 
         minutes_text = st.text_input("Minutes", value="", key="log_minutes")
-        hhmm_text = st.text_input("HH:MM (leave Minutes empty if using this)", value="", key="log_hhmm")
+        hhmm_text = st.text_input(
+            "HH:MM (leave Minutes empty if using this)",
+            value="",
+            key="log_hhmm",
+        )
 
         service = st.selectbox("Service", SERVICES, key="log_service")
         mode = st.selectbox("Mode", MODES, key="log_mode")
@@ -398,9 +408,11 @@ with tab_log:
 
         paid_status = st.selectbox("Paid Status", PAID_OPTIONS, key="log_paid")
 
-        notes = st.text_input("Notes (auto-filled for tutor pay)", value="", key="log_notes")
+        notes = st.text_input(
+            "Notes (auto-filled for tutor pay)", value="", key="log_notes"
+        )
 
-        # Live preview for rate + amount + tutor pay
+        # Live preview
         try:
             if student and service in LEGACY_RATES and mode in MODES:
                 tier, hourly_rate = get_rate_for_student(student, service, mode)
@@ -458,21 +470,23 @@ with tab_log:
                 else:
                     tutor_pay = round(amount_due / 2.0, 2)
 
-            # auto notes
             auto_notes = f"Pay {tutor} ${tutor_pay:.2f}"
             if not notes.strip() or notes.startswith("Pay "):
                 notes = auto_notes
 
             existing = ws.get_all_records()
-            serial = sum(
-                1
-                for r in existing
-                if (
-                    r.get("date") == date_iso
-                    and (r.get("student_name") or "").strip().lower()
-                    == student.strip().lower()
+            serial = (
+                sum(
+                    1
+                    for r in existing
+                    if (
+                        r.get("date") == date_iso
+                        and (r.get("student_name") or "").strip().lower()
+                        == student.strip().lower()
+                    )
                 )
-            ) + 1
+                + 1
+            )
 
             rid = f"{date_iso.replace('-','')}-{student.lower().replace(' ','_')}-{serial}"
 
@@ -568,10 +582,9 @@ with tab_monthly:
         df["year_month"] = df["date"].dt.to_period("M").astype(str)
         df["amount_due"] = pd.to_numeric(df["amount_due"], errors="coerce").fillna(0.0)
 
+        months = sorted(df["year_month"].unique())
         month = st.selectbox(
-            "Select month (YYYY-MM)", sorted(df["year_month"].unique()), index=len(
-                sorted(df["year_month"].unique())
-            ) - 1,
+            "Select month (YYYY-MM)", months, index=len(months) - 1
         )
 
         dfm = df[df["year_month"] == month]
@@ -598,12 +611,15 @@ with tab_zoom:
 
     zoom_cfg = st.secrets.get("zoom", {})
 
-    if not zoom_cfg or not zoom_cfg.get("account_id") or not zoom_cfg.get(
-        "client_id"
-    ) or not zoom_cfg.get("client_secret"):
+    if (
+        not zoom_cfg
+        or not zoom_cfg.get("account_id")
+        or not zoom_cfg.get("client_id")
+        or not zoom_cfg.get("client_secret")
+    ):
         st.warning(
             "Zoom API credentials are not fully set in secrets. "
-            "Fill in [zoom] in your secrets.toml to enable this tab."
+            "Fill in [zoom] in your secrets to enable this tab."
         )
     else:
         colz1, colz2 = st.columns(2)
@@ -663,7 +679,7 @@ with tab_zoom:
 
         if st.button("Create Zoom Meeting", type="primary"):
             try:
-                if not student.strip():
+                if not student or not student.strip():
                     st.error("Student name is required.")
                     st.stop()
 
